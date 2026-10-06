@@ -7,15 +7,18 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
+	"github.com/scottfridwin/offsite-backup-manager/internal/manifest"
 	"github.com/scottfridwin/offsite-backup-manager/internal/roster"
 )
 
@@ -132,8 +135,8 @@ type runSummary struct {
 	PackageURL   string `json:"package_url"`
 }
 
-func (s *server) handleRuns(w http.ResponseWriter, _ *http.Request, _ roster.Node) {
-	runs, err := listRuns(s.cfg.OutputDir)
+func (s *server) handleRuns(w http.ResponseWriter, _ *http.Request, node roster.Node) {
+	runs, err := listRuns(s.cfg.OutputDir, node.ID)
 	if err != nil {
 		s.cfg.Logger.Error("list runs failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to list runs")
@@ -143,8 +146,9 @@ func (s *server) handleRuns(w http.ResponseWriter, _ *http.Request, _ roster.Nod
 }
 
 // listRuns scans OutputDir for complete runs (manifest + signature + package
-// all present) and returns them sorted oldest-first.
-func listRuns(outputDir string) ([]runSummary, error) {
+// all present) that nodeID is eligible to pull per each run's recorded
+// distribution assignment (§8), sorted oldest-first.
+func listRuns(outputDir, nodeID string) ([]runSummary, error) {
 	entries, err := os.ReadDir(outputDir)
 	if err != nil {
 		return nil, err
@@ -163,19 +167,46 @@ func listRuns(outputDir string) ([]runSummary, error) {
 	out := make([]runSummary, 0, len(runIDs))
 	for _, id := range runIDs {
 		pkg := "run-" + id + ".tar.zst.age"
-		manifest := "run-" + id + ".manifest.json"
-		sig := manifest + ".minisig"
+		manifestName := "run-" + id + ".manifest.json"
+		sig := manifestName + ".minisig"
+		manifestPath := filepath.Join(outputDir, manifestName)
 		if !fileExists(filepath.Join(outputDir, pkg)) || !fileExists(filepath.Join(outputDir, sig)) {
 			continue // skip runs still being written
 		}
+		eligible, err := nodeEligibleForRun(manifestPath, nodeID)
+		if err != nil {
+			return nil, fmt.Errorf("check eligibility for run %s: %w", id, err)
+		}
+		if !eligible {
+			continue
+		}
 		out = append(out, runSummary{
 			RunID:        id,
-			ManifestURL:  "/packages/" + manifest,
+			ManifestURL:  "/packages/" + manifestName,
 			SignatureURL: "/packages/" + sig,
 			PackageURL:   "/packages/" + pkg,
 		})
 	}
 	return out, nil
+}
+
+// nodeEligibleForRun reports whether nodeID may pull the run described by
+// manifestPath. Replicate-all (or a manifest with no recorded scheme, for
+// backward compatibility with Phase 1/2 runs) is open to every authenticated
+// node; round-robin is restricted to the manifest's recorded assignment.
+func nodeEligibleForRun(manifestPath, nodeID string) (bool, error) {
+	b, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return false, err
+	}
+	var m manifest.Manifest
+	if err := json.Unmarshal(b, &m); err != nil {
+		return false, fmt.Errorf("parse manifest %q: %w", manifestPath, err)
+	}
+	if m.Distribution.Scheme != manifest.SchemeRoundRobin {
+		return true, nil
+	}
+	return slices.Contains(m.Distribution.AssignedNodeIDs, nodeID), nil
 }
 
 func fileExists(path string) bool {

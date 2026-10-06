@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/scottfridwin/offsite-backup-manager/internal/config"
+	"github.com/scottfridwin/offsite-backup-manager/internal/health"
 	"github.com/scottfridwin/offsite-backup-manager/internal/pipeline"
 	"github.com/scottfridwin/offsite-backup-manager/internal/roster"
 	"github.com/scottfridwin/offsite-backup-manager/internal/server"
@@ -30,6 +31,12 @@ func main() {
 		runServe(os.Args[2:])
 	case "enroll-token":
 		runEnrollToken(os.Args[2:])
+	case "healthcheck":
+		runHealthcheck(os.Args[2:])
+	case "nodes":
+		runNodes(os.Args[2:])
+	case "retire-node":
+		runRetireNode(os.Args[2:])
 	case "version", "-version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "-h", "--help":
@@ -68,15 +75,20 @@ Usage:
   primary package [flags]       Build one encrypted, signed backup package
   primary serve [flags]         Serve the node-facing enroll/pull/heartbeat API
   primary enroll-token [flags]  Issue a one-time node enrollment token
+  primary healthcheck [flags]   Exit 0 if healthy, 1 if not (for Docker HEALTHCHECK)
+  primary nodes [flags]         List enrolled nodes and their status
+  primary retire-node <id>      Decommission a node (§5.4)
   primary version               Print the version
   primary help                  Show this help
 
 package flags:
-  -source        backup source directory (env BACKUP_SOURCE_DIR)
-  -output        output directory (env PACKAGE_OUTPUT_DIR)
-  -work          staging directory (env PACKAGE_WORK_DIR)
-  -recipient     age recipient, repeatable (env AGE_RECIPIENT)
-  -minisign-key  minisign secret key file (env MINISIGN_SECKEY)
+  -source              backup source directory (env BACKUP_SOURCE_DIR)
+  -output              output directory (env PACKAGE_OUTPUT_DIR)
+  -work                staging directory (env PACKAGE_WORK_DIR)
+  -recipient            age recipient, repeatable (env AGE_RECIPIENT)
+  -minisign-key         minisign secret key file (env MINISIGN_SECKEY)
+  -distribution-scheme  replicate-all or round-robin (env DISTRIBUTION_SCHEME)
+  -roster               node roster file; required for round-robin (env NODE_ROSTER_FILE)
 
 serve flags:
   -listen           listen address (env BACKUP_LISTEN_ADDR, default :8080)
@@ -87,6 +99,16 @@ serve flags:
 enroll-token flags:
   -roster           node roster file (env NODE_ROSTER_FILE)
   -enroll-token-ttl enrollment token lifetime (env ENROLL_TOKEN_TTL)
+
+healthcheck flags:
+  -output                   directory serving published runs (env PACKAGE_OUTPUT_DIR)
+  -roster                   node roster file (env NODE_ROSTER_FILE)
+  -health-run-interval      max age of the last successful run before unhealthy (env HEALTH_RUN_INTERVAL)
+  -health-sync-grace        grace window for nodes to confirm the latest run (env HEALTH_SYNC_GRACE)
+  -node-space-critical-pct  node free-space critical threshold (env NODE_SPACE_CRITICAL_PCT)
+
+nodes flags:
+  -roster  node roster file (env NODE_ROSTER_FILE)
 `, version)
 }
 
@@ -142,4 +164,95 @@ func runEnrollToken(args []string) {
 
 	fmt.Println(token)
 	fmt.Fprintf(os.Stderr, "expires in %s; set as ENROLLMENT_TOKEN on the new node before first boot\n", cfg.EnrollTokenTTL)
+}
+
+func runHealthcheck(args []string) {
+	cfg := config.HealthConfigFromEnv()
+	fs := flag.NewFlagSet("healthcheck", flag.ExitOnError)
+	cfg.BindFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
+	res, err := health.Evaluate(health.Config{
+		OutputDir:        cfg.OutputDir,
+		Roster:           roster.Open(cfg.NodeRosterFile),
+		RunInterval:      cfg.RunInterval,
+		SyncGrace:        cfg.SyncGrace,
+		SpaceCriticalPct: cfg.SpaceCriticalPct,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	if res.Healthy {
+		fmt.Println("healthy")
+		return
+	}
+	fmt.Println("unhealthy:")
+	for _, reason := range res.Reasons {
+		fmt.Println("  -", reason)
+	}
+	os.Exit(1)
+}
+
+func runNodes(args []string) {
+	cfg := config.ServerConfigFromEnv()
+	fs := flag.NewFlagSet("nodes", flag.ExitOnError)
+	fs.StringVar(&cfg.NodeRosterFile, "roster", cfg.NodeRosterFile, "node roster file (NODE_ROSTER_FILE)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	if cfg.NodeRosterFile == "" {
+		fmt.Fprintln(os.Stderr, "error: a node roster file is required (set NODE_ROSTER_FILE or -roster)")
+		os.Exit(1)
+	}
+
+	nodes, err := roster.Open(cfg.NodeRosterFile).AllNodes()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	if len(nodes) == 0 {
+		fmt.Println("no enrolled nodes")
+		return
+	}
+	for _, n := range nodes {
+		lastSeen := "never"
+		if !n.LastSeen.IsZero() {
+			lastSeen = n.LastSeen.Format(time.RFC3339)
+		}
+		fmt.Printf("%s  %-10s  %-8s  last_seen=%-20s  last_run=%s\n", n.ID, n.Label, n.Status, lastSeen, n.LastRunID)
+	}
+}
+
+func runRetireNode(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: primary retire-node [-roster FILE] <node-id>")
+		os.Exit(2)
+	}
+	cfg := config.ServerConfigFromEnv()
+	fs := flag.NewFlagSet("retire-node", flag.ExitOnError)
+	fs.StringVar(&cfg.NodeRosterFile, "roster", cfg.NodeRosterFile, "node roster file (NODE_ROSTER_FILE)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	if cfg.NodeRosterFile == "" {
+		fmt.Fprintln(os.Stderr, "error: a node roster file is required (set NODE_ROSTER_FILE or -roster)")
+		os.Exit(1)
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: primary retire-node [-roster FILE] <node-id>")
+		os.Exit(2)
+	}
+
+	if err := roster.Open(cfg.NodeRosterFile).Retire(fs.Arg(0)); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("retired node %s\n", fs.Arg(0))
 }

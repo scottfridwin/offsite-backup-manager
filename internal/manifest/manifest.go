@@ -11,6 +11,12 @@ import (
 // SchemaVersion is the manifest schema version. Bump on breaking changes.
 const SchemaVersion = 1
 
+// Distribution scheme names (§8).
+const (
+	SchemeReplicateAll = "replicate-all"
+	SchemeRoundRobin   = "round-robin"
+)
+
 // Tool records which program produced the manifest.
 type Tool struct {
 	Name    string `json:"name"`
@@ -40,15 +46,24 @@ type Contents struct {
 	TopLevel   []EntrySummary `json:"top_level"`
 }
 
+// Distribution records which nodes this run was assigned to (§8). For
+// "replicate-all" every active node at pull time is eligible regardless of
+// AssignedNodeIDs; for "round-robin" only the listed node IDs may pull it.
+type Distribution struct {
+	Scheme          string   `json:"scheme"`
+	AssignedNodeIDs []string `json:"assigned_node_ids,omitempty"`
+}
+
 // Manifest is the full run manifest.
 type Manifest struct {
-	SchemaVersion int      `json:"schema_version"`
-	RunID         string   `json:"run_id"`
-	CreatedAt     string   `json:"created_at"`
-	SourceDir     string   `json:"source_dir"`
-	Package       Package  `json:"package"`
-	Contents      Contents `json:"contents"`
-	Tool          Tool     `json:"tool"`
+	SchemaVersion int          `json:"schema_version"`
+	RunID         string       `json:"run_id"`
+	CreatedAt     string       `json:"created_at"`
+	SourceDir     string       `json:"source_dir"`
+	Package       Package      `json:"package"`
+	Contents      Contents     `json:"contents"`
+	Distribution  Distribution `json:"distribution"`
+	Tool          Tool         `json:"tool"`
 }
 
 // New returns a manifest with the schema version and creation time populated.

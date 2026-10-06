@@ -13,11 +13,12 @@ HTTPS and store it as **write-once (WORM)** data.
 
 > **Status:** early implementation. **Phase 1 (Primary-side packaging)** is done:
 > the orchestrator stages the source tree and produces an encrypted, signed
-> package + manifest. **Phase 2 (single-node enrollment + pull + heartbeat)** is
-> implemented: the Primary serves a node-facing enroll/pull/heartbeat API and the
-> node agent enrolls, verifies, and stores runs append-only. Multi-node schemes and
-> the health-check gating in docs/requirements.md §8-§9 are still Phase 3. The full
-> design brief lives in [`docs/requirements.md`](docs/requirements.md).
+> package + manifest. **Phase 2 (single-node enrollment + pull + heartbeat)** and
+> **Phase 3 (multi-node distribution schemes + healthcheck gating)** are also
+> implemented: the Primary assigns each run to nodes per a configurable scheme,
+> serves a node-facing enroll/pull/heartbeat API, and exposes a Docker
+> `HEALTHCHECK`-friendly health evaluation. The full design brief lives in
+> [`docs/requirements.md`](docs/requirements.md).
 
 ## Why
 
@@ -127,6 +128,27 @@ and reports a heartbeat (free space, last synced run). Equivalent env vars:
 `BACKUP_HOST`, `ENROLLMENT_TOKEN`, `NODE_LABEL`, `PULL_INTERVAL`, `STORE_DIR`,
 `MINISIGN_PUBKEY`, `CAPACITY_WARN_PCT`; Primary side: `BACKUP_LISTEN_ADDR`,
 `NODE_ROSTER_FILE`, `ENROLL_TOKEN_TTL`.
+
+### Distribution schemes, node lifecycle, and health (Phase 3)
+
+Each `primary package` run is assigned to node(s) per `-distribution-scheme`
+(env `DISTRIBUTION_SCHEME`): `replicate-all` (default; every active node may
+pull every run) or `round-robin` (each run goes to the next node in rotation,
+tracked in `-roster`/`NODE_ROSTER_FILE`). The assignment is recorded in the
+run's manifest, and the Primary's `/runs` API only lists a round-robin run to
+its assigned node.
+
+```bash
+primary nodes -roster /data/roster.json              # list enrolled nodes + status
+primary retire-node -roster /data/roster.json <id>   # decommission a node (§5.4)
+primary healthcheck -output /out -roster /data/roster.json   # exit 0/1 for Docker HEALTHCHECK
+```
+
+`healthcheck` is unhealthy if no run has succeeded within `HEALTH_RUN_INTERVAL`,
+or if — after `HEALTH_SYNC_GRACE` since the latest run — any node required by
+that run's distribution assignment hasn't confirmed pulling it via heartbeat, or
+if any active node's reported free space is at/above `NODE_SPACE_CRITICAL_PCT`.
+Both published container images run this as their Docker `HEALTHCHECK`.
 
 ## AI-generated code
 

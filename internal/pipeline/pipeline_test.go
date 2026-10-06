@@ -9,12 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"aead.dev/minisign"
 	"filippo.io/age"
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/scottfridwin/offsite-backup-manager/internal/config"
+	"github.com/scottfridwin/offsite-backup-manager/internal/manifest"
+	"github.com/scottfridwin/offsite-backup-manager/internal/roster"
 )
 
 func TestRunEndToEnd(t *testing.T) {
@@ -102,6 +105,67 @@ func TestRunEndToEnd(t *testing.T) {
 	if res.Manifest.Contents.FileCount != 2 {
 		t.Errorf("manifest file count = %d, want 2", res.Manifest.Contents.FileCount)
 	}
+
+	// Default distribution scheme is replicate-all, resolved at pull time.
+	if res.Manifest.Distribution.Scheme != manifest.SchemeReplicateAll {
+		t.Errorf("distribution scheme = %q, want %q", res.Manifest.Distribution.Scheme, manifest.SchemeReplicateAll)
+	}
+	if len(res.Manifest.Distribution.AssignedNodeIDs) != 0 {
+		t.Errorf("replicate-all should not pin node IDs at package time, got %v", res.Manifest.Distribution.AssignedNodeIDs)
+	}
+}
+
+func TestBuildDistributionRoundRobin(t *testing.T) {
+	rosterPath := filepath.Join(t.TempDir(), "roster.json")
+	s := roster.Open(rosterPath)
+	a := enrollNode(t, s, "a")
+	b := enrollNode(t, s, "b")
+
+	cfg := config.Config{DistributionScheme: manifest.SchemeRoundRobin, NodeRosterFile: rosterPath}
+
+	first, err := buildDistribution(cfg)
+	if err != nil {
+		t.Fatalf("buildDistribution: %v", err)
+	}
+	second, err := buildDistribution(cfg)
+	if err != nil {
+		t.Fatalf("buildDistribution: %v", err)
+	}
+
+	if first.Scheme != manifest.SchemeRoundRobin || second.Scheme != manifest.SchemeRoundRobin {
+		t.Fatalf("unexpected schemes: %+v %+v", first, second)
+	}
+	if len(first.AssignedNodeIDs) != 1 || len(second.AssignedNodeIDs) != 1 {
+		t.Fatalf("expected exactly one assigned node per run: %+v %+v", first, second)
+	}
+	if first.AssignedNodeIDs[0] == second.AssignedNodeIDs[0] {
+		t.Fatalf("expected successive runs to rotate nodes, got the same node twice: %v", first.AssignedNodeIDs[0])
+	}
+	ids := map[string]bool{a.ID: true, b.ID: true}
+	if !ids[first.AssignedNodeIDs[0]] || !ids[second.AssignedNodeIDs[0]] {
+		t.Fatalf("assigned node not in roster: %+v %+v", first, second)
+	}
+}
+
+func TestBuildDistributionRoundRobinNoActiveNodes(t *testing.T) {
+	rosterPath := filepath.Join(t.TempDir(), "roster.json")
+	cfg := config.Config{DistributionScheme: manifest.SchemeRoundRobin, NodeRosterFile: rosterPath}
+	if _, err := buildDistribution(cfg); err == nil {
+		t.Fatal("expected error with no active nodes")
+	}
+}
+
+func enrollNode(t *testing.T, s *roster.Store, label string) roster.Node {
+	t.Helper()
+	tok, err := s.IssueEnrollmentToken(time.Hour)
+	if err != nil {
+		t.Fatalf("issue enrollment token: %v", err)
+	}
+	node, _, err := s.Enroll(tok, label)
+	if err != nil {
+		t.Fatalf("enroll %s: %v", label, err)
+	}
+	return node
 }
 
 func decryptPackage(t *testing.T, path string, id *age.X25519Identity) map[string]string {

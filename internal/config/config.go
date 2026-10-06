@@ -8,6 +8,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/scottfridwin/offsite-backup-manager/internal/manifest"
 )
 
 // Config holds all Primary-side packaging settings.
@@ -24,6 +26,11 @@ type Config struct {
 	MinisignKeyFile string
 	// MinisignPassword decrypts the minisign secret key, if it is password-protected (MINISIGN_PASSWORD).
 	MinisignPassword string
+	// DistributionScheme is "replicate-all" or "round-robin" (DISTRIBUTION_SCHEME, §8).
+	DistributionScheme string
+	// NodeRosterFile is required when DistributionScheme is "round-robin", to
+	// assign the run to the next node in rotation (NODE_ROSTER_FILE).
+	NodeRosterFile string
 }
 
 var recipientSep = regexp.MustCompile(`[\s,]+`)
@@ -31,12 +38,14 @@ var recipientSep = regexp.MustCompile(`[\s,]+`)
 // FromEnv builds a Config from environment variables.
 func FromEnv() Config {
 	return Config{
-		SourceDir:        os.Getenv("BACKUP_SOURCE_DIR"),
-		WorkDir:          envOr("PACKAGE_WORK_DIR", os.TempDir()),
-		OutputDir:        os.Getenv("PACKAGE_OUTPUT_DIR"),
-		AgeRecipients:    splitRecipients(os.Getenv("AGE_RECIPIENT")),
-		MinisignKeyFile:  os.Getenv("MINISIGN_SECKEY"),
-		MinisignPassword: os.Getenv("MINISIGN_PASSWORD"),
+		SourceDir:          os.Getenv("BACKUP_SOURCE_DIR"),
+		WorkDir:            envOr("PACKAGE_WORK_DIR", os.TempDir()),
+		OutputDir:          os.Getenv("PACKAGE_OUTPUT_DIR"),
+		AgeRecipients:      splitRecipients(os.Getenv("AGE_RECIPIENT")),
+		MinisignKeyFile:    os.Getenv("MINISIGN_SECKEY"),
+		MinisignPassword:   os.Getenv("MINISIGN_PASSWORD"),
+		DistributionScheme: envOr("DISTRIBUTION_SCHEME", manifest.SchemeReplicateAll),
+		NodeRosterFile:     os.Getenv("NODE_ROSTER_FILE"),
 	}
 }
 
@@ -46,6 +55,8 @@ func (c *Config) BindFlags(fs *flag.FlagSet) {
 	fs.StringVar(&c.WorkDir, "work", c.WorkDir, "staging/scratch directory (PACKAGE_WORK_DIR)")
 	fs.StringVar(&c.OutputDir, "output", c.OutputDir, "output directory for package+manifest (PACKAGE_OUTPUT_DIR)")
 	fs.StringVar(&c.MinisignKeyFile, "minisign-key", c.MinisignKeyFile, "minisign secret key file (MINISIGN_SECKEY)")
+	fs.StringVar(&c.DistributionScheme, "distribution-scheme", c.DistributionScheme, "replicate-all or round-robin (DISTRIBUTION_SCHEME)")
+	fs.StringVar(&c.NodeRosterFile, "roster", c.NodeRosterFile, "node roster file; required for round-robin (NODE_ROSTER_FILE)")
 	fs.Func("recipient", "age recipient to encrypt to; repeatable (AGE_RECIPIENT)", func(v string) error {
 		c.AgeRecipients = append(c.AgeRecipients, splitRecipients(v)...)
 		return nil
@@ -65,6 +76,15 @@ func (c Config) Validate() error {
 	}
 	if c.MinisignKeyFile == "" {
 		return fmt.Errorf("a minisign signing key is required (set MINISIGN_SECKEY or -minisign-key)")
+	}
+	switch c.DistributionScheme {
+	case "", manifest.SchemeReplicateAll:
+	case manifest.SchemeRoundRobin:
+		if c.NodeRosterFile == "" {
+			return fmt.Errorf("round-robin distribution requires a node roster file (set NODE_ROSTER_FILE or -roster)")
+		}
+	default:
+		return fmt.Errorf("invalid distribution scheme %q (want %q or %q)", c.DistributionScheme, manifest.SchemeReplicateAll, manifest.SchemeRoundRobin)
 	}
 	return nil
 }

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -30,6 +31,9 @@ const (
 // ErrInvalidToken is returned when an enrollment or pull token does not match
 // any known, usable entry.
 var ErrInvalidToken = errors.New("invalid or expired token")
+
+// ErrNotFound is returned when a node ID does not match any roster entry.
+var ErrNotFound = errors.New("node not found")
 
 // Node is one enrolled backup node.
 type Node struct {
@@ -52,6 +56,9 @@ type pendingToken struct {
 type document struct {
 	Nodes   []Node         `json:"nodes"`
 	Pending []pendingToken `json:"pending_tokens"`
+	// RotationCursor is the ID of the last node assigned by round-robin
+	// distribution, so successive runs keep advancing through the active set.
+	RotationCursor string `json:"rotation_cursor,omitempty"`
 }
 
 // Store is a file-backed roster. It is safe for concurrent use by a single
@@ -271,4 +278,94 @@ func (s *Store) ActiveNodes() ([]Node, error) {
 		}
 	}
 	return out, nil
+}
+
+// AllNodes returns every roster entry (active and retired), sorted by
+// enrollment order, for operator visibility (e.g. `primary nodes`).
+func (s *Store) AllNodes() ([]Node, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	doc, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	return doc.Nodes, nil
+}
+
+// Get returns the roster entry for nodeID.
+func (s *Store) Get(nodeID string) (Node, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	doc, err := s.load()
+	if err != nil {
+		return Node{}, err
+	}
+	for _, n := range doc.Nodes {
+		if n.ID == nodeID {
+			return n, nil
+		}
+	}
+	return Node{}, ErrNotFound
+}
+
+// Retire marks nodeID retired (§5.4): it can no longer authenticate or be
+// assigned future runs. Its existing data on its own media is untouched —
+// the Primary has no path to reach or wipe it.
+func (s *Store) Retire(nodeID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	doc, err := s.load()
+	if err != nil {
+		return err
+	}
+	for i := range doc.Nodes {
+		if doc.Nodes[i].ID == nodeID {
+			doc.Nodes[i].Status = StatusRetired
+			return s.save(doc)
+		}
+	}
+	return ErrNotFound
+}
+
+// NextRoundRobin returns the next active node in rotation for round-robin
+// distribution (§8) and persists the advanced cursor so subsequent runs keep
+// cycling through the current active set. Active nodes are ordered by ID for
+// a stable rotation.
+func (s *Store) NextRoundRobin() (Node, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	doc, err := s.load()
+	if err != nil {
+		return Node{}, err
+	}
+
+	var active []Node
+	for _, n := range doc.Nodes {
+		if n.Status == StatusActive {
+			active = append(active, n)
+		}
+	}
+	if len(active) == 0 {
+		return Node{}, fmt.Errorf("round-robin: no active nodes")
+	}
+	sort.Slice(active, func(i, j int) bool { return active[i].ID < active[j].ID })
+
+	nextIdx := 0
+	for i, n := range active {
+		if n.ID == doc.RotationCursor {
+			nextIdx = (i + 1) % len(active)
+			break
+		}
+	}
+
+	next := active[nextIdx]
+	doc.RotationCursor = next.ID
+	if err := s.save(doc); err != nil {
+		return Node{}, err
+	}
+	return next, nil
 }
