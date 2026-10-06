@@ -20,6 +20,10 @@ secrets/
 *.minisign
 minisign.key
 
+# Node/Primary runtime state — never commit (contains live tokens/roster data)
+roster.json
+.node-credential.json
+
 # Build artifacts / dependencies
 dist/
 build/

@@ -11,10 +11,13 @@ at a remote site). The orchestrator compresses, encrypts, and signs the latest
 backups into a single package per run; nodes **pull** that package over outbound
 HTTPS and store it as **write-once (WORM)** data.
 
-> **Status:** early implementation. **Phase 1 (Primary-side packaging)** is in
-> progress: the orchestrator can stage the source tree and produce an encrypted,
-> signed package + manifest. The node agent is a stub (Phase 2). The full design
-> brief lives in [`docs/requirements.md`](docs/requirements.md).
+> **Status:** early implementation. **Phase 1 (Primary-side packaging)** is done:
+> the orchestrator stages the source tree and produces an encrypted, signed
+> package + manifest. **Phase 2 (single-node enrollment + pull + heartbeat)** is
+> implemented: the Primary serves a node-facing enroll/pull/heartbeat API and the
+> node agent enrolls, verifies, and stores runs append-only. Multi-node schemes and
+> the health-check gating in docs/requirements.md §8-§9 are still Phase 3. The full
+> design brief lives in [`docs/requirements.md`](docs/requirements.md).
 
 ## Why
 
@@ -94,6 +97,36 @@ primary package \
 Equivalent env vars: `BACKUP_SOURCE_DIR`, `PACKAGE_OUTPUT_DIR`, `PACKAGE_WORK_DIR`,
 `AGE_RECIPIENT`, `MINISIGN_SECKEY`, `MINISIGN_PASSWORD`. Output is
 `run-<ts>.tar.zst.age` plus a signed `run-<ts>.manifest.json`(`.minisig`).
+
+### Enrolling and running a node (Phase 2)
+
+On the Primary, serve the node-facing API (behind your reverse proxy) and mint a
+one-time enrollment token per new node:
+
+```bash
+primary serve -output /out -roster /data/roster.json
+primary enroll-token -roster /data/roster.json -enroll-token-ttl 24h
+```
+
+On the node, point it at the Primary and the one-time token from above:
+
+```bash
+node run \
+  -backup-host backup.example.com \
+  -enrollment-token <token-from-enroll-token> \
+  -label pi-garage \
+  -store /data/store \
+  -minisign-pubkey /path/to/minisign.pub
+```
+
+The node enrolls once (persisting its durable pull credential under `-store`),
+then on every `-pull-interval` it fetches the run list, verifies each manifest's
+minisign signature and each package's checksum before ever writing it, stores
+newly-verified runs read-only (never overwriting or re-fetching existing ones),
+and reports a heartbeat (free space, last synced run). Equivalent env vars:
+`BACKUP_HOST`, `ENROLLMENT_TOKEN`, `NODE_LABEL`, `PULL_INTERVAL`, `STORE_DIR`,
+`MINISIGN_PUBKEY`, `CAPACITY_WARN_PCT`; Primary side: `BACKUP_LISTEN_ADDR`,
+`NODE_ROSTER_FILE`, `ENROLL_TOKEN_TTL`.
 
 ## AI-generated code
 

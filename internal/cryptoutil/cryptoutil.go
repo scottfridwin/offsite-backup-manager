@@ -60,3 +60,23 @@ func LoadSigner(path, password string) (*Signer, error) {
 func (s *Signer) Sign(message []byte) []byte {
 	return minisign.Sign(s.key, message)
 }
+
+// Verifier checks detached minisign signatures against a trusted public key.
+type Verifier struct {
+	key minisign.PublicKey
+}
+
+// LoadVerifier reads a minisign public key file.
+func LoadVerifier(path string) (*Verifier, error) {
+	key, err := minisign.PublicKeyFromFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("load minisign public key %q: %w", path, err)
+	}
+	return &Verifier{key: key}, nil
+}
+
+// Verify reports whether signature is a valid detached minisign signature of
+// message produced by the corresponding private key.
+func (v *Verifier) Verify(message, signature []byte) bool {
+	return minisign.Verify(v.key, message, signature)
+}
