@@ -74,3 +74,109 @@ func TestHeartbeatUnknownNode(t *testing.T) {
 		t.Fatal("expected error for unknown node")
 	}
 }
+
+func enrollNode(t *testing.T, s *Store, label string) Node {
+	t.Helper()
+	tok, err := s.IssueEnrollmentToken(time.Hour)
+	if err != nil {
+		t.Fatalf("issue enrollment token: %v", err)
+	}
+	node, _, err := s.Enroll(tok, label)
+	if err != nil {
+		t.Fatalf("enroll %s: %v", label, err)
+	}
+	return node
+}
+
+func TestRetireAndGet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "roster.json")
+	s := Open(path)
+	node := enrollNode(t, s, "pi-garage")
+
+	got, err := s.Get(node.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != StatusActive {
+		t.Fatalf("expected active, got %v", got.Status)
+	}
+
+	if err := s.Retire(node.ID); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	got, err = s.Get(node.ID)
+	if err != nil {
+		t.Fatalf("get after retire: %v", err)
+	}
+	if got.Status != StatusRetired {
+		t.Fatalf("expected retired, got %v", got.Status)
+	}
+
+	// A retired node can no longer authenticate.
+	if _, err := s.Authenticate("anything"); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("expected ErrInvalidToken, got %v", err)
+	}
+
+	if err := s.Retire("does-not-exist"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound retiring unknown node, got %v", err)
+	}
+	if _, err := s.Get("does-not-exist"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound getting unknown node, got %v", err)
+	}
+}
+
+func TestNextRoundRobin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "roster.json")
+	s := Open(path)
+
+	if _, err := s.NextRoundRobin(); err == nil {
+		t.Fatal("expected error with no active nodes")
+	}
+
+	a := enrollNode(t, s, "a")
+	b := enrollNode(t, s, "b")
+	c := enrollNode(t, s, "c")
+
+	ids := []string{a.ID, b.ID, c.ID}
+	sortedIDs := append([]string(nil), ids...)
+	// NextRoundRobin orders active nodes by ID; replicate the same ordering
+	// here so the expected rotation sequence is deterministic regardless of
+	// the random IDs generated above.
+	for i := 0; i < len(sortedIDs); i++ {
+		for j := i + 1; j < len(sortedIDs); j++ {
+			if sortedIDs[j] < sortedIDs[i] {
+				sortedIDs[i], sortedIDs[j] = sortedIDs[j], sortedIDs[i]
+			}
+		}
+	}
+
+	var got []string
+	for i := 0; i < 6; i++ {
+		n, err := s.NextRoundRobin()
+		if err != nil {
+			t.Fatalf("next round robin: %v", err)
+		}
+		got = append(got, n.ID)
+	}
+	want := append(append([]string{}, sortedIDs...), sortedIDs...)
+	if len(got) != len(want) {
+		t.Fatalf("unexpected rotation length: %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("rotation mismatch at %d: got %v want %v", i, got, want)
+		}
+	}
+
+	// Retiring the current cursor node must not break rotation.
+	if err := s.Retire(sortedIDs[0]); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	n, err := s.NextRoundRobin()
+	if err != nil {
+		t.Fatalf("next round robin after retire: %v", err)
+	}
+	if n.ID == sortedIDs[0] {
+		t.Fatalf("retired node must not be assigned: %v", n)
+	}
+}

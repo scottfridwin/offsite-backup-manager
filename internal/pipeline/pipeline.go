@@ -17,6 +17,7 @@ import (
 	"github.com/scottfridwin/offsite-backup-manager/internal/config"
 	"github.com/scottfridwin/offsite-backup-manager/internal/cryptoutil"
 	"github.com/scottfridwin/offsite-backup-manager/internal/manifest"
+	"github.com/scottfridwin/offsite-backup-manager/internal/roster"
 	"github.com/scottfridwin/offsite-backup-manager/internal/stage"
 )
 
@@ -85,6 +86,10 @@ func Run(cfg config.Config, version string) (Result, error) {
 		Encryption:  "age",
 	}
 	m.Contents = buildContents(stats)
+	m.Distribution, err = buildDistribution(cfg)
+	if err != nil {
+		return Result{}, fmt.Errorf("distribution assignment: %w", err)
+	}
 	m.Tool = manifest.Tool{Name: "offsite-backup-manager", Version: version}
 
 	mb, err := m.Marshal()
@@ -161,4 +166,24 @@ func buildContents(stats archive.Stats) manifest.Contents {
 		})
 	}
 	return c
+}
+
+// buildDistribution assigns this run to node(s) per the configured scheme
+// (§8). Replicate-all is resolved at pull time by the server (every
+// currently-active node is eligible); round-robin is resolved here, once,
+// against the roster's rotation cursor, and recorded so it never changes.
+func buildDistribution(cfg config.Config) (manifest.Distribution, error) {
+	scheme := cfg.DistributionScheme
+	if scheme == "" {
+		scheme = manifest.SchemeReplicateAll
+	}
+	if scheme != manifest.SchemeRoundRobin {
+		return manifest.Distribution{Scheme: scheme}, nil
+	}
+
+	node, err := roster.Open(cfg.NodeRosterFile).NextRoundRobin()
+	if err != nil {
+		return manifest.Distribution{}, err
+	}
+	return manifest.Distribution{Scheme: scheme, AssignedNodeIDs: []string{node.ID}}, nil
 }

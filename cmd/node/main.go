@@ -26,6 +26,10 @@ func main() {
 	switch os.Args[1] {
 	case "run":
 		runAgent(os.Args[2:])
+	case "healthcheck":
+		// Liveness only (the process can exec): the richer run-confirmation
+		// health gating in docs/requirements.md §9.2 lives on the Primary.
+		fmt.Println("ok")
 	case "version", "-version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "-h", "--help":
@@ -77,7 +81,8 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `offsite-backup-manager (node) %s
 
 Usage:
-  node run [flags]   Enroll (if needed) and run the pull + heartbeat loop
+  node run [flags]    Enroll (if needed) and run the pull + heartbeat loop
+  node healthcheck    Exit 0 (liveness only, for Docker HEALTHCHECK)
   node version        Print the version
   node help           Show this help
 
