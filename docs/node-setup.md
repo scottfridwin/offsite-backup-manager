@@ -49,31 +49,56 @@ capacity guidance below.
 
 ## 4. First boot: environment + auto-start unit
 
-Example `docker-compose.yml` (adjust paths/image for your setup):
+Example `docker-compose.yml` (adjust paths/image/version for your setup):
 
 ```yaml
 services:
-  node:
-    image: ghcr.io/scottfridwin/offsite-backup-manager-node:latest
-    restart: unless-stopped
-    environment:
-      BACKUP_HOST: backup.example.com
-      ENROLLMENT_TOKEN: "<one-time token from step 1>"
-      NODE_LABEL: pi-garage
-      STORE_DIR: /store
-      MINISIGN_PUBKEY: /config/minisign.pub
-      PULL_INTERVAL: 1h
-      CAPACITY_WARN_PCT: "90"
-    volumes:
-      - /srv/backup-node/store:/store
-      - /srv/backup-node/minisign.pub:/config/minisign.pub:ro
+  backup-node:
+    image: ghcr.io/scottfridwin/offsite-backup-manager-node:v0.1.0
+    container_name: backup-node
     command: ["run"]
+    restart: unless-stopped
+    security_opt:
+      - "no-new-privileges=true"
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    secrets:
+      - enrollment_token
+    environment:
+      - BACKUP_HOST=backup.example.com
+      - ENROLLMENT_TOKEN_FILE=/run/secrets/enrollment_token
+      - NODE_LABEL=pi-garage
+      - STORE_DIR=/store
+      - MINISIGN_PUBKEY=/config/minisign.pub
+      - PULL_INTERVAL=1h
+      - CAPACITY_WARN_PCT=90
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ${DIR_DATA}/backup-node/store:/store
+      - ${DIR_CONFIG}/backup-node/minisign.pub:/config/minisign.pub:ro
+
+secrets:
+  enrollment_token:
+    file: ${DIR_CONFIG}/backup-node/secrets/enrollment_token
 ```
+
+The node needs no custom `networks:` entry (default bridge) — it only ever
+dials *out*, so it needs outbound internet access and nothing else; don't put
+it on an `internal: true`/no-internet network. `ENROLLMENT_TOKEN_FILE` follows
+the project's secrets-as-files convention (any secret-shaped env var also
+accepts a `<KEY>_FILE` variant pointing at a file, so it never needs to appear
+inline in the compose file); a plain `ENROLLMENT_TOKEN` value works the same
+way if you don't use Docker secrets.
 
 Equivalent plain `docker run`:
 
 ```bash
 docker run -d --name backup-node --restart unless-stopped \
+  --security-opt no-new-privileges=true --cap-drop ALL --read-only \
+  --tmpfs /tmp \
   -e BACKUP_HOST=backup.example.com \
   -e ENROLLMENT_TOKEN=<one-time-token> \
   -e NODE_LABEL=pi-garage \
@@ -81,7 +106,7 @@ docker run -d --name backup-node --restart unless-stopped \
   -e MINISIGN_PUBKEY=/config/minisign.pub \
   -v /srv/backup-node/store:/store \
   -v /srv/backup-node/minisign.pub:/config/minisign.pub:ro \
-  ghcr.io/scottfridwin/offsite-backup-manager-node:latest run
+  ghcr.io/scottfridwin/offsite-backup-manager-node:v0.1.0 run
 ```
 
 On first start, the agent redeems `ENROLLMENT_TOKEN` against `BACKUP_HOST`,

@@ -9,4 +9,7 @@ require (
 	golang.org/x/sys v0.21.0
 )
 
-require golang.org/x/crypto v0.24.0 // indirect
+require (
+	github.com/robfig/cron/v3 v3.0.1 // indirect
+	golang.org/x/crypto v0.24.0 // indirect
+)

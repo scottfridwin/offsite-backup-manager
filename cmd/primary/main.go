@@ -2,11 +2,17 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
+
+	"github.com/robfig/cron/v3"
 
 	"github.com/scottfridwin/offsite-backup-manager/internal/capacity"
 	"github.com/scottfridwin/offsite-backup-manager/internal/config"
@@ -52,7 +58,11 @@ func main() {
 }
 
 func runPackage(args []string) {
-	cfg := config.FromEnv()
+	cfg, err := config.FromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
 	fs := flag.NewFlagSet("package", flag.ExitOnError)
 	cfg.BindFlags(fs)
 	if err := fs.Parse(args); err != nil {
@@ -99,6 +109,9 @@ serve flags:
   -output           directory serving published runs (env PACKAGE_OUTPUT_DIR)
   -roster           node roster file (env NODE_ROSTER_FILE)
   -enroll-token-ttl enrollment token lifetime (env ENROLL_TOKEN_TTL)
+  -schedule         cron expression for self-scheduled packaging runs; empty
+                    disables (env SCHEDULE). When set, serve also needs every
+                    'package' env var (BACKUP_SOURCE_DIR, AGE_RECIPIENT, etc.)
 
 enroll-token flags:
   -roster           node roster file (env NODE_ROSTER_FILE)
@@ -144,11 +157,70 @@ func runServe(args []string) {
 		WriteTimeout:      5 * time.Minute, // package downloads can be large
 	}
 
-	fmt.Printf("listening on %s (output=%s roster=%s)\n", cfg.ListenAddr, cfg.OutputDir, cfg.NodeRosterFile)
-	if err := httpServer.ListenAndServe(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+	scheduler := startScheduler(cfg)
+	if scheduler != nil {
+		defer scheduler.Stop()
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() {
+		fmt.Printf("listening on %s (output=%s roster=%s)\n", cfg.ListenAddr, cfg.OutputDir, cfg.NodeRosterFile)
+		errCh <- httpServer.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			fmt.Fprintln(os.Stderr, "error during shutdown:", err)
+		}
+	}
+}
+
+// startScheduler starts the opt-in self-scheduler (§9.1) when cfg.Schedule is
+// set, triggering `pipeline.Run` on its own cron schedule from the same
+// env-derived packaging config `primary package` would use. Returns nil (and
+// does nothing) when scheduling is disabled.
+func startScheduler(cfg config.ServerConfig) *cron.Cron {
+	if cfg.Schedule == "" {
+		return nil
+	}
+
+	pkgCfg, err := config.FromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: SCHEDULE is set but packaging config is invalid:", err)
 		os.Exit(1)
 	}
+	if err := pkgCfg.Validate(); err != nil {
+		fmt.Fprintln(os.Stderr, "error: SCHEDULE is set but packaging config is invalid:", err)
+		os.Exit(1)
+	}
+
+	c := cron.New()
+	_, err = c.AddFunc(cfg.Schedule, func() {
+		res, err := pipeline.Run(pkgCfg, version)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "scheduled run failed:", err)
+			return
+		}
+		fmt.Printf("scheduled run %s published\n", res.RunID)
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: invalid SCHEDULE cron expression:", err)
+		os.Exit(1)
+	}
+	c.Start()
+	fmt.Printf("self-scheduling packaging runs: %s\n", cfg.Schedule)
+	return c
 }
 
 func runEnrollToken(args []string) {

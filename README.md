@@ -11,12 +11,13 @@ at a remote site). The orchestrator compresses, encrypts, and signs the latest
 backups into a single package per run; nodes **pull** that package over outbound
 HTTPS and store it as **write-once (WORM)** data.
 
-> **Status:** early implementation. **Phase 1 (Primary-side packaging)** is done:
-> the orchestrator stages the source tree and produces an encrypted, signed
-> package + manifest. **Phase 2 (single-node enrollment + pull + heartbeat)**,
-> **Phase 3 (multi-node distribution schemes + healthcheck gating)**, and
-> **Phase 5 (capacity projection + operational runbooks)** are also implemented.
-> Phase 4 (optional monitoring-agent-on-node reverse channel) remains deferred.
+> **Status:** feature-complete for a v0.1 test release. **Phases 1, 2, 3, and 5**
+> of the roadmap are implemented — Primary-side packaging, node enrollment +
+> append-only pull + heartbeat, multi-node distribution schemes + healthcheck
+> gating, and capacity projection + operational runbooks. **Phase 4** (optional
+> monitoring-agent-on-node reverse channel) remains deferred — tracked in
+> [issue #7](https://github.com/scottfridwin/offsite-backup-manager/issues/7),
+> only picked up if an operator specifically wants it.
 > The full design brief lives in [`docs/requirements.md`](docs/requirements.md);
 > see also the [restore drill runbook](docs/restore-runbook.md) and the
 > [node build/provisioning guide](docs/node-setup.md).
@@ -53,15 +54,18 @@ gets encrypted copies **off-site** with:
 See [`docs/requirements.md`](docs/requirements.md) for the detailed design,
 threat model, and decisions.
 
-## Repository layout (planned)
+## Repository layout
 
-This is intended to become a **monorepo** that builds and publishes both sides as
-container images to GitHub Container Registry:
+This is a **monorepo** that builds and publishes both sides as container images
+to GitHub Container Registry on every `vX.Y.Z` tag (see
+[`.github/workflows/release.yml`](.github/workflows/release.yml)), tagged with
+that exact version (no `latest`):
 
 - `ghcr.io/scottfridwin/offsite-backup-manager-primary` — the Primary orchestrator.
 - `ghcr.io/scottfridwin/offsite-backup-manager-node` — the node agent.
 
-(Image names are provisional and may change before the first release.)
+Both are multi-arch (`linux/amd64`, `linux/arm64`, `linux/arm/v7`) so the node
+image runs on a Raspberry Pi. See [Deployment](#deployment) below.
 
 ## Tech stack
 
@@ -97,8 +101,12 @@ primary package \
 ```
 
 Equivalent env vars: `BACKUP_SOURCE_DIR`, `PACKAGE_OUTPUT_DIR`, `PACKAGE_WORK_DIR`,
-`AGE_RECIPIENT`, `MINISIGN_SECKEY`, `MINISIGN_PASSWORD`. Output is
+`AGE_RECIPIENT`, `MINISIGN_SECKEY`, `MINISIGN_PASSWORD` (or `MINISIGN_PASSWORD_FILE`
+to read it from a file instead, e.g. a Docker secret). Output is
 `run-<ts>.tar.zst.age` plus a signed `run-<ts>.manifest.json`(`.minisig`).
+
+Run manually like this for a one-off, or let `primary serve` trigger it on a
+schedule internally (see [Deployment](#deployment)) — both use the same config.
 
 ### Enrolling and running a node (Phase 2)
 
@@ -126,9 +134,9 @@ then on every `-pull-interval` it fetches the run list, verifies each manifest's
 minisign signature and each package's checksum before ever writing it, stores
 newly-verified runs read-only (never overwriting or re-fetching existing ones),
 and reports a heartbeat (free space, last synced run). Equivalent env vars:
-`BACKUP_HOST`, `ENROLLMENT_TOKEN`, `NODE_LABEL`, `PULL_INTERVAL`, `STORE_DIR`,
-`MINISIGN_PUBKEY`, `CAPACITY_WARN_PCT`; Primary side: `BACKUP_LISTEN_ADDR`,
-`NODE_ROSTER_FILE`, `ENROLL_TOKEN_TTL`.
+`BACKUP_HOST`, `ENROLLMENT_TOKEN` (or `ENROLLMENT_TOKEN_FILE`), `NODE_LABEL`,
+`PULL_INTERVAL`, `STORE_DIR`, `MINISIGN_PUBKEY`, `CAPACITY_WARN_PCT`; Primary
+side: `BACKUP_LISTEN_ADDR`, `NODE_ROSTER_FILE`, `ENROLL_TOKEN_TTL`, `SCHEDULE`.
 
 ### Distribution schemes, node lifecycle, and health (Phase 3)
 
@@ -163,6 +171,86 @@ active node's time-to-full from its last-reported free space (§7.3). See
 [`docs/node-setup.md`](docs/node-setup.md) for provisioning a new node and
 [`docs/restore-runbook.md`](docs/restore-runbook.md) for the manual restore
 drill.
+
+## Deployment
+
+Both images are published to GHCR on tagged releases (see
+[Repository layout](#repository-layout)); pin to a specific `vX.Y.Z` — there is
+no `latest` tag. The Primary is a single long-running container: `serve` runs
+the node-facing API continuously and, if `SCHEDULE` is set, also self-schedules
+packaging runs internally (§9.1) — no external cron/orchestrator scheduling is
+required, though it still works fine under one if you'd rather trigger
+`primary package` yourself (leave `SCHEDULE` unset).
+
+Example `docker-compose.yml` for the Primary, behind Traefik, with the
+secrets-as-files convention and hardened container options:
+
+```yaml
+secrets:
+  minisign_seckey:
+    file: ${DIR_CONFIG}/backup-primary/secrets/minisign.key
+  minisign_password:
+    file: ${DIR_CONFIG}/backup-primary/secrets/minisign_password
+
+networks:
+  t2_proxy:
+    external: true
+
+services:
+  backup-primary:
+    image: ghcr.io/scottfridwin/offsite-backup-manager-primary:v0.1.0
+    container_name: backup-primary
+    command: ["serve"]
+    restart: unless-stopped
+    security_opt:
+      - "no-new-privileges=true"
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    secrets:
+      - minisign_seckey
+      - minisign_password
+    environment:
+      - BACKUP_SOURCE_DIR=/backups
+      - PACKAGE_WORK_DIR=/work
+      - PACKAGE_OUTPUT_DIR=/data/out
+      - NODE_ROSTER_FILE=/data/roster.json
+      - AGE_RECIPIENT=age1examplexxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      - MINISIGN_SECKEY=/run/secrets/minisign_seckey
+      - MINISIGN_PASSWORD_FILE=/run/secrets/minisign_password
+      - BACKUP_LISTEN_ADDR=:8080
+      - SCHEDULE=0 12 1 * *  # monthly, midday; omit to trigger `package` externally instead
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /srv/backups:/backups:ro
+      - ${DIR_DATA}/backup-primary/work:/work
+      - ${DIR_DATA}/backup-primary/out:/data/out
+      - ${DIR_DATA}/backup-primary/roster.json:/data/roster.json
+    networks:
+      t2_proxy:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backup-rtr.entrypoints=https"
+      - "traefik.http.routers.backup-rtr.rule=Host(`backup.${DOMAINNAME}`)"
+      # Node routes must bypass human/SSO auth (§4.4) — the bearer token is
+      # enforced inside the app itself.
+      - "traefik.http.routers.backup-rtr.middlewares=chain-no-auth@file"
+      - "traefik.http.routers.backup-rtr.service=backup-svc"
+      - "traefik.http.services.backup-svc.loadbalancer.server.port=8080"
+```
+
+Admin commands run as one-offs against the same image (`enroll-token`, `nodes`,
+`retire-node`, `capacity`, or a manual `package`), e.g.:
+
+```bash
+docker exec backup-primary /app enroll-token -roster /data/roster.json -enroll-token-ttl 24h
+docker exec backup-primary /app nodes -roster /data/roster.json
+```
+
+See [`docs/node-setup.md`](docs/node-setup.md) for the matching node-side
+compose example (no inbound network needed — it only ever dials out).
 
 ## AI-generated code
 

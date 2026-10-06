@@ -42,7 +42,11 @@ func main() {
 }
 
 func runAgent(args []string) {
-	cfg := config.NodeConfigFromEnv()
+	cfg, err := config.NodeConfigFromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	cfg.BindFlags(fs)
 	if err := fs.Parse(args); err != nil {

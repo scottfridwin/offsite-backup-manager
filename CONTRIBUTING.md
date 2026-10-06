@@ -52,6 +52,13 @@ go test ./...
 # golangci-lint run   # if installed
 ```
 
+## Releasing
+
+Push a `vX.Y.Z` tag on `main` (e.g. `git tag -s v0.1.0 && git push origin v0.1.0`)
+to trigger [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which builds and publishes both multi-arch images to GHCR tagged with that
+exact version (no `latest`).
+
 ## Code of conduct
 
 Be respectful and constructive. Assume good faith.
