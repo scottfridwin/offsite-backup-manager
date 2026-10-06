@@ -1,0 +1,38 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Secrets & local config — never commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+**/secrets/
+
+# Crypto material (age identities, minisign keys) — never commit
+*.age
+*.agekey
+*.minisign
+minisign.key
+
+# Build artifacts / dependencies
+dist/
+build/
+bin/
+out/
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+target/
+
+# Logs & local runtime state
+*.log
+/tmp/
+staging/
