@@ -11,8 +11,10 @@ at a remote site). The orchestrator compresses, encrypts, and signs the latest
 backups into a single package per run; nodes **pull** that package over outbound
 HTTPS and store it as **write-once (WORM)** data.
 
-> **Status:** design phase. The full requirements & design brief lives in
-> [`docs/requirements.md`](docs/requirements.md). No implementation yet.
+> **Status:** early implementation. **Phase 1 (Primary-side packaging)** is in
+> progress: the orchestrator can stage the source tree and produce an encrypted,
+> signed package + manifest. The node agent is a stub (Phase 2). The full design
+> brief lives in [`docs/requirements.md`](docs/requirements.md).
 
 ## Why
 
@@ -63,6 +65,35 @@ container images to GitHub Container Registry:
   attack surface).
 - **Crypto:** `age` (asymmetric package encryption) + `minisign` (manifest signing).
 - **Packaging:** `tar` + `zstd`, delivered as OCI images on GHCR.
+
+## Development
+
+The repo ships a **dev container** (`.devcontainer/`) with Go, `golangci-lint`, and
+the `age`/`minisign` CLIs preinstalled — open the folder in VS Code and "Reopen in
+Container" for a consistent environment.
+
+Common tasks (see the [`Makefile`](Makefile)):
+
+```bash
+make build      # build bin/primary and bin/node
+make test       # go test -race ./...
+make lint       # golangci-lint run
+make docker-primary   # build the primary image
+```
+
+### Running a packaging run (Phase 1)
+
+```bash
+primary package \
+  -source /backups \
+  -output /out \
+  -recipient age1examplexxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+  -minisign-key /path/to/minisign.key
+```
+
+Equivalent env vars: `BACKUP_SOURCE_DIR`, `PACKAGE_OUTPUT_DIR`, `PACKAGE_WORK_DIR`,
+`AGE_RECIPIENT`, `MINISIGN_SECKEY`, `MINISIGN_PASSWORD`. Output is
+`run-<ts>.tar.zst.age` plus a signed `run-<ts>.manifest.json`(`.minisig`).
 
 ## AI-generated code
 
