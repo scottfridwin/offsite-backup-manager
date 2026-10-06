@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect Go module
+        id: detect
+        run: |
+          if [ -f go.mod ]; then echo "go=true" >> "$GITHUB_OUTPUT"; else echo "go=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Set up Go
+        if: steps.detect.outputs.go == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Build
+        if: steps.detect.outputs.go == 'true'
+        run: go build ./...
+
+      - name: Vet
+        if: steps.detect.outputs.go == 'true'
+        run: go vet ./...
+
+      - name: Test
+        if: steps.detect.outputs.go == 'true'
+        run: go test -race ./...
+
+      - name: Lint
+        if: steps.detect.outputs.go == 'true'
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+      - name: No Go code yet
+        if: steps.detect.outputs.go == 'false'
+        run: echo "No go.mod present yet — build/test/lint will activate once Go code lands."
