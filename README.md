@@ -13,12 +13,13 @@ HTTPS and store it as **write-once (WORM)** data.
 
 > **Status:** early implementation. **Phase 1 (Primary-side packaging)** is done:
 > the orchestrator stages the source tree and produces an encrypted, signed
-> package + manifest. **Phase 2 (single-node enrollment + pull + heartbeat)** and
-> **Phase 3 (multi-node distribution schemes + healthcheck gating)** are also
-> implemented: the Primary assigns each run to nodes per a configurable scheme,
-> serves a node-facing enroll/pull/heartbeat API, and exposes a Docker
-> `HEALTHCHECK`-friendly health evaluation. The full design brief lives in
-> [`docs/requirements.md`](docs/requirements.md).
+> package + manifest. **Phase 2 (single-node enrollment + pull + heartbeat)**,
+> **Phase 3 (multi-node distribution schemes + healthcheck gating)**, and
+> **Phase 5 (capacity projection + operational runbooks)** are also implemented.
+> Phase 4 (optional monitoring-agent-on-node reverse channel) remains deferred.
+> The full design brief lives in [`docs/requirements.md`](docs/requirements.md);
+> see also the [restore drill runbook](docs/restore-runbook.md) and the
+> [node build/provisioning guide](docs/node-setup.md).
 
 ## Why
 
@@ -149,6 +150,19 @@ or if — after `HEALTH_SYNC_GRACE` since the latest run — any node required b
 that run's distribution assignment hasn't confirmed pulling it via heartbeat, or
 if any active node's reported free space is at/above `NODE_SPACE_CRITICAL_PCT`.
 Both published container images run this as their Docker `HEALTHCHECK`.
+
+### Capacity projection (Phase 5)
+
+```bash
+primary capacity -output /out -roster /data/roster.json
+```
+
+Projects average package size and run cadence from already-published runs
+(no separate cadence config needed), the resulting growth/year, and each
+active node's time-to-full from its last-reported free space (§7.3). See
+[`docs/node-setup.md`](docs/node-setup.md) for provisioning a new node and
+[`docs/restore-runbook.md`](docs/restore-runbook.md) for the manual restore
+drill.
 
 ## AI-generated code
 

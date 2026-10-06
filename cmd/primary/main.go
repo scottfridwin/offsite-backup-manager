@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/scottfridwin/offsite-backup-manager/internal/capacity"
 	"github.com/scottfridwin/offsite-backup-manager/internal/config"
 	"github.com/scottfridwin/offsite-backup-manager/internal/health"
 	"github.com/scottfridwin/offsite-backup-manager/internal/pipeline"
@@ -37,6 +38,8 @@ func main() {
 		runNodes(os.Args[2:])
 	case "retire-node":
 		runRetireNode(os.Args[2:])
+	case "capacity":
+		runCapacity(os.Args[2:])
 	case "version", "-version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "-h", "--help":
@@ -78,6 +81,7 @@ Usage:
   primary healthcheck [flags]   Exit 0 if healthy, 1 if not (for Docker HEALTHCHECK)
   primary nodes [flags]         List enrolled nodes and their status
   primary retire-node <id>      Decommission a node (§5.4)
+  primary capacity [flags]      Project storage growth and node time-to-full (§7.3)
   primary version               Print the version
   primary help                  Show this help
 
@@ -109,6 +113,10 @@ healthcheck flags:
 
 nodes flags:
   -roster  node roster file (env NODE_ROSTER_FILE)
+
+capacity flags:
+  -output  directory serving published runs (env PACKAGE_OUTPUT_DIR)
+  -roster  node roster file; omit to skip per-node projections (env NODE_ROSTER_FILE)
 `, version)
 }
 
@@ -255,4 +263,58 @@ func runRetireNode(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("retired node %s\n", fs.Arg(0))
+}
+
+func runCapacity(args []string) {
+	cfg := config.ServerConfigFromEnv()
+	fs := flag.NewFlagSet("capacity", flag.ExitOnError)
+	fs.StringVar(&cfg.OutputDir, "output", cfg.OutputDir, "directory serving published runs (PACKAGE_OUTPUT_DIR)")
+	fs.StringVar(&cfg.NodeRosterFile, "roster", cfg.NodeRosterFile, "node roster file (NODE_ROSTER_FILE)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	if cfg.OutputDir == "" {
+		fmt.Fprintln(os.Stderr, "error: output directory is required (set PACKAGE_OUTPUT_DIR or -output)")
+		os.Exit(1)
+	}
+
+	proj, err := capacity.Compute(cfg.OutputDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	if proj.RunCount == 0 {
+		fmt.Println("no published runs yet; nothing to project")
+		return
+	}
+
+	fmt.Printf("runs published:     %d\n", proj.RunCount)
+	fmt.Printf("avg package size:   %d bytes\n", proj.AvgPackageBytes)
+	if !proj.HasCadence {
+		fmt.Println("avg cadence:        insufficient history (need at least 2 runs)")
+	} else {
+		fmt.Printf("avg cadence:        %s\n", proj.AvgCadence.Round(time.Minute))
+		fmt.Printf("projected growth/yr: %d bytes\n", proj.GrowthPerYr)
+	}
+
+	if cfg.NodeRosterFile == "" {
+		return
+	}
+	nodes, err := roster.Open(cfg.NodeRosterFile).ActiveNodes()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	if len(nodes) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Println("node time-to-full (from last reported free space):")
+	for _, np := range capacity.NodeProjections(proj, nodes) {
+		if !np.HasEstimate {
+			fmt.Printf("  %s (%s): free=%d bytes, insufficient data to project\n", np.Label, np.NodeID, np.FreeBytes)
+			continue
+		}
+		fmt.Printf("  %s (%s): free=%d bytes, ~%s until full\n", np.Label, np.NodeID, np.FreeBytes, np.TimeToFull.Round(time.Hour))
+	}
 }
