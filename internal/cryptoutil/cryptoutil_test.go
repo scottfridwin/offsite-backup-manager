@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/rand"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"aead.dev/minisign"
@@ -71,5 +73,41 @@ func TestSignAndVerify(t *testing.T) {
 	}
 	if minisign.Verify(pub, []byte("tampered"), sig) {
 		t.Fatal("verification should fail for tampered message")
+	}
+}
+
+func TestLoadVerifier(t *testing.T) {
+	pub, priv, err := minisign.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	pubText, err := pub.MarshalText()
+	if err != nil {
+		t.Fatalf("marshal public key: %v", err)
+	}
+	pubPath := filepath.Join(t.TempDir(), "minisign.pub")
+	if err := os.WriteFile(pubPath, pubText, 0o640); err != nil {
+		t.Fatalf("write public key: %v", err)
+	}
+
+	verifier, err := LoadVerifier(pubPath)
+	if err != nil {
+		t.Fatalf("load verifier: %v", err)
+	}
+
+	msg := []byte("manifest contents")
+	sig := minisign.Sign(priv, msg)
+
+	if !verifier.Verify(msg, sig) {
+		t.Fatal("signature did not verify")
+	}
+	if verifier.Verify([]byte("tampered"), sig) {
+		t.Fatal("verification should fail for tampered message")
+	}
+}
+
+func TestLoadVerifierMissingFile(t *testing.T) {
+	if _, err := LoadVerifier(filepath.Join(t.TempDir(), "missing.pub")); err == nil {
+		t.Fatal("expected error for missing public key file")
 	}
 }
