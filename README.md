@@ -48,10 +48,14 @@ Both also expose admin subcommands (`package`, `enroll-token`, `nodes`,
 
 ## Quick start
 
+Steps 1-2 use a throwaway container so you don't need `age`/`minisign`
+installed on the host; both write their output into the current directory.
+
 1. **Generate an age keypair** — the Primary only ever holds the public half:
 
    ```bash
-   age-keygen -o age-identity.txt
+   docker run --rm -v "$PWD":/out -w /out debian:bookworm-slim bash -c \
+     "apt-get update -qq && apt-get install -y -qq age >/dev/null && age-keygen -o age-identity.txt"
    ```
 
    Save the printed `Public key: age1...` as `AGE_RECIPIENT` below. Store
@@ -62,11 +66,15 @@ Both also expose admin subcommands (`package`, `enroll-token`, `nodes`,
 2. **Generate a minisign keypair** — signs each run's manifest:
 
    ```bash
-   minisign -G -p minisign.pub -s minisign.key
+   docker run --rm -it -v "$PWD":/out -w /out debian:bookworm-slim bash -c \
+     "apt-get update -qq && apt-get install -y -qq minisign >/dev/null && minisign -G -p minisign.pub -s minisign.key"
    ```
 
-   `minisign.key` stays on the Primary (`MINISIGN_SECKEY`); `minisign.pub` is
-   copied to every node (`MINISIGN_PUBKEY`) to verify what it pulls.
+   (`-it` so you can set a passphrase interactively when prompted — optional,
+   but recommended for the Primary's signing key.) `minisign.key` stays on the
+   Primary (`MINISIGN_SECKEY`, with the passphrase as `MINISIGN_PASSWORD`);
+   `minisign.pub` is copied to every node (`MINISIGN_PUBKEY`) to verify what
+   it pulls.
 
 3. **Start the Primary** (needs to be reachable over HTTPS for nodes to reach
    it — see [Deployment](#deployment) for a proxied, hardened setup):
