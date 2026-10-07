@@ -95,8 +95,8 @@ networks:
     external: true
 ```
 
-Admin commands run as one-offs against the same image, e.g.
-`docker exec backup-primary /app nodes -roster /data/roster.json`. See
+Admin commands run as one-offs against the same service, e.g.
+`docker compose exec backup-primary /app nodes -roster /data/roster.json`. See
 [`docs/node-setup.md`](docs/node-setup.md) for the matching node-side compose
 example (no inbound network needed — it only ever dials out) and
 [`docs/usage.md`](docs/usage.md) for every command and environment variable.
