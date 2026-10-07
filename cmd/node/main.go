@@ -18,14 +18,16 @@ import (
 var version = "dev"
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+	// Default to "run" (the image's primary function) so container usage
+	// needs no explicit command/CLI needs no subcommand for the common case.
+	cmd, args := "run", os.Args[1:]
+	if len(args) > 0 {
+		cmd, args = args[0], args[1:]
 	}
 
-	switch os.Args[1] {
+	switch cmd {
 	case "run":
-		runAgent(os.Args[2:])
+		runAgent(args)
 	case "healthcheck":
 		// Liveness only (the process can exec): the richer run-confirmation
 		// health gating in docs/requirements.md §9.2 lives on the Primary.
@@ -35,14 +37,18 @@ func main() {
 	case "help", "-h", "--help":
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		usage()
 		os.Exit(2)
 	}
 }
 
 func runAgent(args []string) {
-	cfg := config.NodeConfigFromEnv()
+	cfg, err := config.NodeConfigFromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	cfg.BindFlags(fs)
 	if err := fs.Parse(args); err != nil {
@@ -81,7 +87,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `offsite-backup-manager (node) %s
 
 Usage:
-  node run [flags]    Enroll (if needed) and run the pull + heartbeat loop
+  node [run flags]    Enroll (if needed) and run the pull + heartbeat loop (default)
   node healthcheck    Exit 0 (liveness only, for Docker HEALTHCHECK)
   node version        Print the version
   node help           Show this help

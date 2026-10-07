@@ -3,6 +3,7 @@
 package cryptoutil
 
 import (
+	"crypto/rand"
 	"fmt"
 	"io"
 	"strings"
@@ -79,4 +80,34 @@ func LoadVerifier(path string) (*Verifier, error) {
 // message produced by the corresponding private key.
 func (v *Verifier) Verify(message, signature []byte) bool {
 	return minisign.Verify(v.key, message, signature)
+}
+
+// GenerateAgeIdentity creates a new X25519 identity, returning its plaintext
+// identity string (AGE-SECRET-KEY-1...) and its public recipient (age1...).
+func GenerateAgeIdentity() (identity, recipient string, err error) {
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		return "", "", fmt.Errorf("generate age identity: %w", err)
+	}
+	return id.String(), id.Recipient().String(), nil
+}
+
+// GenerateMinisignKeyPair creates a new minisign keypair, returning the
+// on-disk text of the public key and the (optionally password-protected)
+// secret key, in the format LoadVerifier/LoadSigner expect. An empty
+// password produces an unprotected secret key.
+func GenerateMinisignKeyPair(password string) (pubText, secText []byte, err error) {
+	pub, priv, err := minisign.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate minisign key: %w", err)
+	}
+	pubText, err = pub.MarshalText()
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal minisign public key: %w", err)
+	}
+	secText, err = minisign.EncryptKey(password, priv)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode minisign secret key: %w", err)
+	}
+	return pubText, secText, nil
 }

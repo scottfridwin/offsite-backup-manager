@@ -26,16 +26,20 @@ type NodeConfig struct {
 }
 
 // NodeConfigFromEnv builds a NodeConfig from environment variables.
-func NodeConfigFromEnv() NodeConfig {
+func NodeConfigFromEnv() (NodeConfig, error) {
+	enrollmentToken, err := SecretFromEnv("ENROLLMENT_TOKEN")
+	if err != nil {
+		return NodeConfig{}, err
+	}
 	return NodeConfig{
 		BackupHost:         envOr("BACKUP_HOST", ""),
-		EnrollmentToken:    envOr("ENROLLMENT_TOKEN", ""),
+		EnrollmentToken:    enrollmentToken,
 		NodeLabel:          envOr("NODE_LABEL", ""),
 		PullInterval:       envDurationOr("PULL_INTERVAL", time.Hour),
 		StoreDir:           envOr("STORE_DIR", ""),
 		MinisignPubKeyFile: envOr("MINISIGN_PUBKEY", ""),
 		CapacityWarnPct:    envFloatOr("CAPACITY_WARN_PCT", 90),
-	}
+	}, nil
 }
 
 // BindFlags registers flags that override the current (env-derived) values.

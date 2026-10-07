@@ -421,6 +421,14 @@ domain setup. Only the *node* needs a pointer-home value (`BACKUP_HOST`).
 | `STORE_DIR` | Append-only package store (WORM). |
 | `CAPACITY_WARN_PCT` | Local free-space warning threshold. |
 
+### Secrets-as-files convention
+Any config key documented above that holds a secret value (currently
+`MINISIGN_PASSWORD` and `ENROLLMENT_TOKEN`) also accepts a `<KEY>_FILE` variant
+— e.g. `MINISIGN_PASSWORD_FILE=/run/secrets/minisign_password` — whose contents
+are read and used instead, so the secret never needs to appear inline in a
+compose file or process environment. `MINISIGN_SECKEY`/`MINISIGN_PUBKEY` are
+already file paths (not inline values) and need no such variant.
+
 ---
 
 ## 12. Security & threat model (summary)

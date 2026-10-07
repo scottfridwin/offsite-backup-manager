@@ -36,17 +36,21 @@ type Config struct {
 var recipientSep = regexp.MustCompile(`[\s,]+`)
 
 // FromEnv builds a Config from environment variables.
-func FromEnv() Config {
+func FromEnv() (Config, error) {
+	minisignPassword, err := SecretFromEnv("MINISIGN_PASSWORD")
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		SourceDir:          os.Getenv("BACKUP_SOURCE_DIR"),
 		WorkDir:            envOr("PACKAGE_WORK_DIR", os.TempDir()),
 		OutputDir:          os.Getenv("PACKAGE_OUTPUT_DIR"),
 		AgeRecipients:      splitRecipients(os.Getenv("AGE_RECIPIENT")),
 		MinisignKeyFile:    os.Getenv("MINISIGN_SECKEY"),
-		MinisignPassword:   os.Getenv("MINISIGN_PASSWORD"),
+		MinisignPassword:   minisignPassword,
 		DistributionScheme: envOr("DISTRIBUTION_SCHEME", manifest.SchemeReplicateAll),
 		NodeRosterFile:     os.Getenv("NODE_ROSTER_FILE"),
-	}
+	}, nil
 }
 
 // BindFlags registers flags that override the current (env-derived) values.
@@ -109,4 +113,19 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// SecretFromEnv reads a sensitive value, preferring <KEY>_FILE (the Docker/
+// Compose secrets convention: a file path whose contents are the value) over
+// the literal <KEY> env var, so secrets never need to appear inline in a
+// compose file or process environment.
+func SecretFromEnv(key string) (string, error) {
+	if path := os.Getenv(key + "_FILE"); path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read %s_FILE %q: %w", key, path, err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	return os.Getenv(key), nil
 }

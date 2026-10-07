@@ -2,14 +2,22 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
 	"time"
+
+	"github.com/robfig/cron/v3"
 
 	"github.com/scottfridwin/offsite-backup-manager/internal/capacity"
 	"github.com/scottfridwin/offsite-backup-manager/internal/config"
+	"github.com/scottfridwin/offsite-backup-manager/internal/cryptoutil"
 	"github.com/scottfridwin/offsite-backup-manager/internal/health"
 	"github.com/scottfridwin/offsite-backup-manager/internal/pipeline"
 	"github.com/scottfridwin/offsite-backup-manager/internal/roster"
@@ -20,39 +28,47 @@ import (
 var version = "dev"
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+	// Default to "serve" (the image's primary function) so container usage
+	// needs no explicit command/CLI needs no subcommand for the common case.
+	cmd, args := "serve", os.Args[1:]
+	if len(args) > 0 {
+		cmd, args = args[0], args[1:]
 	}
 
-	switch os.Args[1] {
+	switch cmd {
 	case "package":
-		runPackage(os.Args[2:])
+		runPackage(args)
 	case "serve":
-		runServe(os.Args[2:])
+		runServe(args)
 	case "enroll-token":
-		runEnrollToken(os.Args[2:])
+		runEnrollToken(args)
 	case "healthcheck":
-		runHealthcheck(os.Args[2:])
+		runHealthcheck(args)
 	case "nodes":
-		runNodes(os.Args[2:])
+		runNodes(args)
 	case "retire-node":
-		runRetireNode(os.Args[2:])
+		runRetireNode(args)
 	case "capacity":
-		runCapacity(os.Args[2:])
+		runCapacity(args)
+	case "keygen":
+		runKeygen(args)
 	case "version", "-version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "-h", "--help":
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		usage()
 		os.Exit(2)
 	}
 }
 
 func runPackage(args []string) {
-	cfg := config.FromEnv()
+	cfg, err := config.FromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
 	fs := flag.NewFlagSet("package", flag.ExitOnError)
 	cfg.BindFlags(fs)
 	if err := fs.Parse(args); err != nil {
@@ -75,13 +91,14 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `offsite-backup-manager (primary) %s
 
 Usage:
+  primary [serve flags]         Serve the node-facing enroll/pull/heartbeat API (default)
   primary package [flags]       Build one encrypted, signed backup package
-  primary serve [flags]         Serve the node-facing enroll/pull/heartbeat API
   primary enroll-token [flags]  Issue a one-time node enrollment token
   primary healthcheck [flags]   Exit 0 if healthy, 1 if not (for Docker HEALTHCHECK)
   primary nodes [flags]         List enrolled nodes and their status
   primary retire-node <id>      Decommission a node (§5.4)
   primary capacity [flags]      Project storage growth and node time-to-full (§7.3)
+  primary keygen [flags]        Generate an age identity + a minisign keypair
   primary version               Print the version
   primary help                  Show this help
 
@@ -99,6 +116,9 @@ serve flags:
   -output           directory serving published runs (env PACKAGE_OUTPUT_DIR)
   -roster           node roster file (env NODE_ROSTER_FILE)
   -enroll-token-ttl enrollment token lifetime (env ENROLL_TOKEN_TTL)
+  -schedule         cron expression for self-scheduled packaging runs; empty
+                    disables (env SCHEDULE). When set, serve also needs every
+                    'package' env var (BACKUP_SOURCE_DIR, AGE_RECIPIENT, etc.)
 
 enroll-token flags:
   -roster           node roster file (env NODE_ROSTER_FILE)
@@ -117,6 +137,11 @@ nodes flags:
 capacity flags:
   -output  directory serving published runs (env PACKAGE_OUTPUT_DIR)
   -roster  node roster file; omit to skip per-node projections (env NODE_ROSTER_FILE)
+
+keygen flags:
+  -out                directory to write the generated keys into (default .)
+  -minisign-password  passphrase for the minisign secret key; empty generates
+                      an unprotected key (env MINISIGN_PASSWORD or _FILE)
 `, version)
 }
 
@@ -144,11 +169,70 @@ func runServe(args []string) {
 		WriteTimeout:      5 * time.Minute, // package downloads can be large
 	}
 
-	fmt.Printf("listening on %s (output=%s roster=%s)\n", cfg.ListenAddr, cfg.OutputDir, cfg.NodeRosterFile)
-	if err := httpServer.ListenAndServe(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+	scheduler := startScheduler(cfg)
+	if scheduler != nil {
+		defer scheduler.Stop()
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() {
+		fmt.Printf("listening on %s (output=%s roster=%s)\n", cfg.ListenAddr, cfg.OutputDir, cfg.NodeRosterFile)
+		errCh <- httpServer.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			fmt.Fprintln(os.Stderr, "error during shutdown:", err)
+		}
+	}
+}
+
+// startScheduler starts the opt-in self-scheduler (§9.1) when cfg.Schedule is
+// set, triggering `pipeline.Run` on its own cron schedule from the same
+// env-derived packaging config `primary package` would use. Returns nil (and
+// does nothing) when scheduling is disabled.
+func startScheduler(cfg config.ServerConfig) *cron.Cron {
+	if cfg.Schedule == "" {
+		return nil
+	}
+
+	pkgCfg, err := config.FromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: SCHEDULE is set but packaging config is invalid:", err)
 		os.Exit(1)
 	}
+	if err := pkgCfg.Validate(); err != nil {
+		fmt.Fprintln(os.Stderr, "error: SCHEDULE is set but packaging config is invalid:", err)
+		os.Exit(1)
+	}
+
+	c := cron.New()
+	_, err = c.AddFunc(cfg.Schedule, func() {
+		res, err := pipeline.Run(pkgCfg, version)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "scheduled run failed:", err)
+			return
+		}
+		fmt.Printf("scheduled run %s published\n", res.RunID)
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error: invalid SCHEDULE cron expression:", err)
+		os.Exit(1)
+	}
+	c.Start()
+	fmt.Printf("self-scheduling packaging runs: %s\n", cfg.Schedule)
+	return c
 }
 
 func runEnrollToken(args []string) {
@@ -317,4 +401,64 @@ func runCapacity(args []string) {
 		}
 		fmt.Printf("  %s (%s): free=%d bytes, ~%s until full\n", np.Label, np.NodeID, np.FreeBytes, np.TimeToFull.Round(time.Hour))
 	}
+}
+
+func runKeygen(args []string) {
+	var outDir, minisignPassword string
+	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
+	fs.StringVar(&outDir, "out", ".", "directory to write the generated keys into")
+	fs.StringVar(&minisignPassword, "minisign-password", "", "passphrase for the minisign secret key; empty generates an unprotected key (env MINISIGN_PASSWORD or MINISIGN_PASSWORD_FILE)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	if minisignPassword == "" {
+		pw, err := config.SecretFromEnv("MINISIGN_PASSWORD")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		minisignPassword = pw
+	}
+
+	if err := os.MkdirAll(outDir, 0o750); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
+	identity, recipient, err := cryptoutil.GenerateAgeIdentity()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	identityPath := filepath.Join(outDir, "age-identity.txt")
+	identityFile := fmt.Sprintf("# created by: primary keygen\n# public key: %s\n%s\n", recipient, identity)
+	if err := os.WriteFile(identityPath, []byte(identityFile), 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
+	pubText, secText, err := cryptoutil.GenerateMinisignKeyPair(minisignPassword)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	pubPath := filepath.Join(outDir, "minisign.pub")
+	secPath := filepath.Join(outDir, "minisign.key")
+	if err := os.WriteFile(pubPath, pubText, 0o644); err != nil { //nolint:gosec // public key, world-readable is fine
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(secPath, secText, 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("wrote %s (age identity -- move this to your password manager, keep it off the Primary)\n", identityPath)
+	fmt.Printf("wrote %s (minisign secret key -- stays on the Primary, MINISIGN_SECKEY)\n", secPath)
+	fmt.Printf("wrote %s (minisign public key -- copy to every node, MINISIGN_PUBKEY)\n", pubPath)
+	if minisignPassword == "" {
+		fmt.Fprintln(os.Stderr, "warning: minisign secret key is unprotected; set -minisign-password (or MINISIGN_PASSWORD/_FILE) to encrypt it")
+	}
+	fmt.Println()
+	fmt.Printf("AGE_RECIPIENT=%s\n", recipient)
 }
