@@ -5,6 +5,18 @@ This page walks through the common commands; see
 [`docs/requirements.md`](requirements.md) for the full design rationale behind
 each option.
 
+## Primary: generating keys
+
+```bash
+primary keygen -out ./keys -minisign-password <your-passphrase>
+```
+
+Generates a fresh `age` identity (`age-identity.txt`) and a `minisign` keypair
+(`minisign.key`, `minisign.pub`) and prints `AGE_RECIPIENT=age1...`. Omit
+`-minisign-password` (or set `MINISIGN_PASSWORD`/`MINISIGN_PASSWORD_FILE`) for
+an unprotected secret key. Move `age-identity.txt` to a password manager and
+off the Primary — see [`docs/restore-runbook.md`](restore-runbook.md).
+
 ## Primary: building a package manually
 
 ```bash

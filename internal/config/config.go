@@ -37,7 +37,7 @@ var recipientSep = regexp.MustCompile(`[\s,]+`)
 
 // FromEnv builds a Config from environment variables.
 func FromEnv() (Config, error) {
-	minisignPassword, err := secretFromEnv("MINISIGN_PASSWORD")
+	minisignPassword, err := SecretFromEnv("MINISIGN_PASSWORD")
 	if err != nil {
 		return Config{}, err
 	}
@@ -115,11 +115,11 @@ func envOr(key, def string) string {
 	return def
 }
 
-// secretFromEnv reads a sensitive value, preferring <KEY>_FILE (the Docker/
+// SecretFromEnv reads a sensitive value, preferring <KEY>_FILE (the Docker/
 // Compose secrets convention: a file path whose contents are the value) over
 // the literal <KEY> env var, so secrets never need to appear inline in a
 // compose file or process environment.
-func secretFromEnv(key string) (string, error) {
+func SecretFromEnv(key string) (string, error) {
 	if path := os.Getenv(key + "_FILE"); path != "" {
 		b, err := os.ReadFile(path)
 		if err != nil {

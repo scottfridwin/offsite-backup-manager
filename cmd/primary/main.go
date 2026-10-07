@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 	"github.com/scottfridwin/offsite-backup-manager/internal/capacity"
 	"github.com/scottfridwin/offsite-backup-manager/internal/config"
+	"github.com/scottfridwin/offsite-backup-manager/internal/cryptoutil"
 	"github.com/scottfridwin/offsite-backup-manager/internal/health"
 	"github.com/scottfridwin/offsite-backup-manager/internal/pipeline"
 	"github.com/scottfridwin/offsite-backup-manager/internal/roster"
@@ -48,6 +50,8 @@ func main() {
 		runRetireNode(args)
 	case "capacity":
 		runCapacity(args)
+	case "keygen":
+		runKeygen(args)
 	case "version", "-version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "-h", "--help":
@@ -94,6 +98,7 @@ Usage:
   primary nodes [flags]         List enrolled nodes and their status
   primary retire-node <id>      Decommission a node (§5.4)
   primary capacity [flags]      Project storage growth and node time-to-full (§7.3)
+  primary keygen [flags]        Generate an age identity + a minisign keypair
   primary version               Print the version
   primary help                  Show this help
 
@@ -132,6 +137,11 @@ nodes flags:
 capacity flags:
   -output  directory serving published runs (env PACKAGE_OUTPUT_DIR)
   -roster  node roster file; omit to skip per-node projections (env NODE_ROSTER_FILE)
+
+keygen flags:
+  -out                directory to write the generated keys into (default .)
+  -minisign-password  passphrase for the minisign secret key; empty generates
+                      an unprotected key (env MINISIGN_PASSWORD or _FILE)
 `, version)
 }
 
@@ -391,4 +401,64 @@ func runCapacity(args []string) {
 		}
 		fmt.Printf("  %s (%s): free=%d bytes, ~%s until full\n", np.Label, np.NodeID, np.FreeBytes, np.TimeToFull.Round(time.Hour))
 	}
+}
+
+func runKeygen(args []string) {
+	var outDir, minisignPassword string
+	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
+	fs.StringVar(&outDir, "out", ".", "directory to write the generated keys into")
+	fs.StringVar(&minisignPassword, "minisign-password", "", "passphrase for the minisign secret key; empty generates an unprotected key (env MINISIGN_PASSWORD or MINISIGN_PASSWORD_FILE)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	if minisignPassword == "" {
+		pw, err := config.SecretFromEnv("MINISIGN_PASSWORD")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		minisignPassword = pw
+	}
+
+	if err := os.MkdirAll(outDir, 0o750); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
+	identity, recipient, err := cryptoutil.GenerateAgeIdentity()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	identityPath := filepath.Join(outDir, "age-identity.txt")
+	identityFile := fmt.Sprintf("# created by: primary keygen\n# public key: %s\n%s\n", recipient, identity)
+	if err := os.WriteFile(identityPath, []byte(identityFile), 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
+	pubText, secText, err := cryptoutil.GenerateMinisignKeyPair(minisignPassword)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	pubPath := filepath.Join(outDir, "minisign.pub")
+	secPath := filepath.Join(outDir, "minisign.key")
+	if err := os.WriteFile(pubPath, pubText, 0o644); err != nil { //nolint:gosec // public key, world-readable is fine
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(secPath, secText, 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("wrote %s (age identity -- move this to your password manager, keep it off the Primary)\n", identityPath)
+	fmt.Printf("wrote %s (minisign secret key -- stays on the Primary, MINISIGN_SECKEY)\n", secPath)
+	fmt.Printf("wrote %s (minisign public key -- copy to every node, MINISIGN_PUBKEY)\n", pubPath)
+	if minisignPassword == "" {
+		fmt.Fprintln(os.Stderr, "warning: minisign secret key is unprotected; set -minisign-password (or MINISIGN_PASSWORD/_FILE) to encrypt it")
+	}
+	fmt.Println()
+	fmt.Printf("AGE_RECIPIENT=%s\n", recipient)
 }

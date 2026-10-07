@@ -48,35 +48,25 @@ Both also expose admin subcommands (`package`, `enroll-token`, `nodes`,
 
 ## Quick start
 
-Steps 1-2 use a throwaway container so you don't need `age`/`minisign`
-installed on the host; both write their output into the current directory.
-
-1. **Generate an age keypair** — the Primary only ever holds the public half:
+1. **Generate an age identity + a minisign keypair** using the Primary image
+   itself (no local `age`/`minisign` install needed):
 
    ```bash
-   docker run --rm -v "$PWD":/out -w /out debian:bookworm-slim bash -c \
-     "apt-get update -qq && apt-get install -y -qq age >/dev/null && age-keygen -o age-identity.txt"
+   docker run --rm -v "$PWD":/out \
+     ghcr.io/scottfridwin/offsite-backup-manager-primary:v0.1.0 \
+     keygen -out /out -minisign-password <your-passphrase>
    ```
 
-   Save the printed `Public key: age1...` as `AGE_RECIPIENT` below. Store
+   This writes `age-identity.txt`, `minisign.key`, and `minisign.pub` into the
+   current directory and prints `AGE_RECIPIENT=age1...` for step 2. Store
    `age-identity.txt` somewhere safe (a password manager) and off the Primary
    — it's only needed later to decrypt backups (see
-   [`docs/restore-runbook.md`](docs/restore-runbook.md)).
-
-2. **Generate a minisign keypair** — signs each run's manifest:
-
-   ```bash
-   docker run --rm -it -v "$PWD":/out -w /out debian:bookworm-slim bash -c \
-     "apt-get update -qq && apt-get install -y -qq minisign >/dev/null && minisign -G -p minisign.pub -s minisign.key"
-   ```
-
-   (`-it` so you can set a passphrase interactively when prompted — optional,
-   but recommended for the Primary's signing key.) `minisign.key` stays on the
-   Primary (`MINISIGN_SECKEY`, with the passphrase as `MINISIGN_PASSWORD`);
+   [`docs/restore-runbook.md`](docs/restore-runbook.md)). `minisign.key` stays
+   on the Primary (`MINISIGN_SECKEY`, passphrase as `MINISIGN_PASSWORD`);
    `minisign.pub` is copied to every node (`MINISIGN_PUBKEY`) to verify what
-   it pulls.
+   it pulls. Omit `-minisign-password` for an unprotected key (not recommended).
 
-3. **Start the Primary** (needs to be reachable over HTTPS for nodes to reach
+2. **Start the Primary** (needs to be reachable over HTTPS for nodes to reach
    it — see [Deployment](#deployment) for a proxied, hardened setup):
 
    ```bash
@@ -93,20 +83,20 @@ installed on the host; both write their output into the current directory.
      ghcr.io/scottfridwin/offsite-backup-manager-primary:v0.1.0
    ```
 
-4. **Mint a one-time enrollment token** for your first node:
+3. **Mint a one-time enrollment token** for your first node:
 
    ```bash
    docker exec backup-primary /app enroll-token -roster /data/roster.json
    ```
 
-5. **Configure and start a node**, pointed at the Primary with that token:
+4. **Configure and start a node**, pointed at the Primary with that token:
 
    ```bash
    docker run -d --name backup-node \
      -v ./store:/store \
      -v ./minisign.pub:/minisign.pub:ro \
      -e BACKUP_HOST=backup.example.com \
-     -e ENROLLMENT_TOKEN=<token-from-step-4> \
+     -e ENROLLMENT_TOKEN=<token-from-step-3> \
      -e NODE_LABEL=pi-garage \
      -e STORE_DIR=/store \
      -e MINISIGN_PUBKEY=/minisign.pub \

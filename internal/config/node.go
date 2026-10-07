@@ -27,7 +27,7 @@ type NodeConfig struct {
 
 // NodeConfigFromEnv builds a NodeConfig from environment variables.
 func NodeConfigFromEnv() (NodeConfig, error) {
-	enrollmentToken, err := secretFromEnv("ENROLLMENT_TOKEN")
+	enrollmentToken, err := SecretFromEnv("ENROLLMENT_TOKEN")
 	if err != nil {
 		return NodeConfig{}, err
 	}

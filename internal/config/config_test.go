@@ -8,7 +8,7 @@ import (
 
 func TestSecretFromEnvLiteral(t *testing.T) {
 	t.Setenv("TEST_SECRET", "literal-value")
-	v, err := secretFromEnv("TEST_SECRET")
+	v, err := SecretFromEnv("TEST_SECRET")
 	if err != nil {
 		t.Fatalf("secretFromEnv: %v", err)
 	}
@@ -25,7 +25,7 @@ func TestSecretFromEnvFile(t *testing.T) {
 	t.Setenv("TEST_SECRET", "literal-should-be-ignored")
 	t.Setenv("TEST_SECRET_FILE", path)
 
-	v, err := secretFromEnv("TEST_SECRET")
+	v, err := SecretFromEnv("TEST_SECRET")
 	if err != nil {
 		t.Fatalf("secretFromEnv: %v", err)
 	}
@@ -36,13 +36,13 @@ func TestSecretFromEnvFile(t *testing.T) {
 
 func TestSecretFromEnvMissingFile(t *testing.T) {
 	t.Setenv("TEST_SECRET_FILE", filepath.Join(t.TempDir(), "does-not-exist"))
-	if _, err := secretFromEnv("TEST_SECRET"); err == nil {
+	if _, err := SecretFromEnv("TEST_SECRET"); err == nil {
 		t.Fatal("expected error for missing secret file")
 	}
 }
 
 func TestSecretFromEnvUnset(t *testing.T) {
-	v, err := secretFromEnv("TEST_SECRET_NOT_SET")
+	v, err := SecretFromEnv("TEST_SECRET_NOT_SET")
 	if err != nil {
 		t.Fatalf("secretFromEnv: %v", err)
 	}
