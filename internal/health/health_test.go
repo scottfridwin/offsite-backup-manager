@@ -36,16 +36,121 @@ func newManifestAt(runID string, createdAt time.Time, scheme string, assigned []
 	return m
 }
 
-func TestEvaluateNoRunsYet(t *testing.T) {
+func TestEvaluateNoRunsNoScheduleIsHealthy(t *testing.T) {
 	outputDir := t.TempDir()
 	store := roster.Open(filepath.Join(t.TempDir(), "roster.json"))
 
+	// No runs and no schedule: no cadence is known, so nothing can be missed.
 	res, err := Evaluate(Config{OutputDir: outputDir, Roster: store, RunInterval: time.Hour, SyncGrace: time.Minute, SpaceCriticalPct: 90})
 	if err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
+	if !res.Healthy {
+		t.Fatalf("expected a fresh primary with no schedule to be healthy, got: %v", res.Reasons)
+	}
+}
+
+func TestEvaluateMissingOutputDirIsHealthy(t *testing.T) {
+	// A freshly deployed primary whose output dir doesn't exist yet must not
+	// error; it's simply "no runs yet".
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	store := roster.Open(filepath.Join(t.TempDir(), "roster.json"))
+
+	res, err := Evaluate(Config{OutputDir: missing, Roster: store, SyncGrace: time.Minute, SpaceCriticalPct: 90})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if !res.Healthy {
+		t.Fatalf("expected healthy when output dir is absent, got: %v", res.Reasons)
+	}
+}
+
+func TestEvaluateNoRunsBeforeFirstScheduledRunIsHealthy(t *testing.T) {
+	outputDir := t.TempDir()
+	store := roster.Open(filepath.Join(t.TempDir(), "roster.json"))
+
+	deploy := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(outputDir, deploy, deploy); err != nil {
+		t.Fatal(err)
+	}
+	now := deploy.Add(time.Hour) // first daily 12:00 run isn't due yet
+
+	res, err := Evaluate(Config{
+		OutputDir: outputDir, Roster: store,
+		Schedule: "0 12 * * *", SyncGrace: time.Hour, SpaceCriticalPct: 90,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if !res.Healthy {
+		t.Fatalf("expected healthy before the first scheduled run, got: %v", res.Reasons)
+	}
+}
+
+func TestEvaluateNoRunsAfterMissedFirstScheduledRunIsUnhealthy(t *testing.T) {
+	outputDir := t.TempDir()
+	store := roster.Open(filepath.Join(t.TempDir(), "roster.json"))
+
+	deploy := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(outputDir, deploy, deploy); err != nil {
+		t.Fatal(err)
+	}
+	now := deploy.Add(25 * time.Hour) // well past the first 12:00 run + grace
+
+	res, err := Evaluate(Config{
+		OutputDir: outputDir, Roster: store,
+		Schedule: "0 12 * * *", SyncGrace: time.Hour, SpaceCriticalPct: 90,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
 	if res.Healthy {
-		t.Fatal("expected unhealthy with no runs")
+		t.Fatal("expected unhealthy once the first scheduled run is missed")
+	}
+}
+
+func TestEvaluateScheduleToleratesIntervalBetweenRuns(t *testing.T) {
+	outputDir := t.TempDir()
+	store := roster.Open(filepath.Join(t.TempDir(), "roster.json"))
+
+	// Monthly schedule; the last run is 14 days old (well past the 48h fixed
+	// interval), but the next scheduled run isn't due yet, so it's healthy.
+	now := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+	writeRun(t, outputDir, newManifestAt("20260101T120000Z", time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC), manifest.SchemeReplicateAll, nil))
+
+	res, err := Evaluate(Config{
+		OutputDir: outputDir, Roster: store,
+		Schedule: "0 12 1 * *", RunInterval: 48 * time.Hour, SyncGrace: 6 * time.Hour, SpaceCriticalPct: 90,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if !res.Healthy {
+		t.Fatalf("expected healthy between scheduled monthly runs, got: %v", res.Reasons)
+	}
+}
+
+func TestEvaluateScheduleUnhealthyWhenRunMissed(t *testing.T) {
+	outputDir := t.TempDir()
+	store := roster.Open(filepath.Join(t.TempDir(), "roster.json"))
+
+	// Daily schedule; the last run is 2 days old, so a scheduled run was missed.
+	now := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
+	writeRun(t, outputDir, newManifestAt("20260101T120000Z", time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC), manifest.SchemeReplicateAll, nil))
+
+	res, err := Evaluate(Config{
+		OutputDir: outputDir, Roster: store,
+		Schedule: "0 12 * * *", RunInterval: 48 * time.Hour, SyncGrace: 6 * time.Hour, SpaceCriticalPct: 90,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if res.Healthy {
+		t.Fatal("expected unhealthy when a scheduled run was missed")
 	}
 }
 

@@ -22,6 +22,9 @@ type HealthConfig struct {
 	// SpaceCriticalPct is the node free-space level that drives the Primary
 	// unhealthy, via heartbeat (NODE_SPACE_CRITICAL_PCT).
 	SpaceCriticalPct float64
+	// Schedule is the cron expression the primary self-schedules on (SCHEDULE);
+	// when set, run freshness is judged against expected scheduled occurrences.
+	Schedule string
 }
 
 // HealthConfigFromEnv builds a HealthConfig from environment variables.
@@ -32,6 +35,7 @@ func HealthConfigFromEnv() HealthConfig {
 		RunInterval:      envDurationOr("HEALTH_RUN_INTERVAL", 48*time.Hour),
 		SyncGrace:        envDurationOr("HEALTH_SYNC_GRACE", 6*time.Hour),
 		SpaceCriticalPct: envFloatOr("NODE_SPACE_CRITICAL_PCT", 90),
+		Schedule:         envOr("SCHEDULE", ""),
 	}
 }
 
@@ -42,6 +46,7 @@ func (c *HealthConfig) BindFlags(fs *flag.FlagSet) {
 	fs.DurationVar(&c.RunInterval, "health-run-interval", c.RunInterval, "max age of the last successful run before unhealthy (HEALTH_RUN_INTERVAL)")
 	fs.DurationVar(&c.SyncGrace, "health-sync-grace", c.SyncGrace, "grace window for nodes to confirm the latest run (HEALTH_SYNC_GRACE)")
 	fs.Float64Var(&c.SpaceCriticalPct, "node-space-critical-pct", c.SpaceCriticalPct, "node free-space critical threshold (NODE_SPACE_CRITICAL_PCT)")
+	fs.StringVar(&c.Schedule, "schedule", c.Schedule, "cron expression the primary self-schedules on (SCHEDULE)")
 }
 
 // Validate checks that the required fields are present.

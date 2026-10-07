@@ -127,7 +127,8 @@ enroll-token flags:
 healthcheck flags:
   -output                   directory serving published runs (env PACKAGE_OUTPUT_DIR)
   -roster                   node roster file (env NODE_ROSTER_FILE)
-  -health-run-interval      max age of the last successful run before unhealthy (env HEALTH_RUN_INTERVAL)
+  -schedule                 cron the primary self-schedules on; judges run freshness (env SCHEDULE)
+  -health-run-interval      max age of the last run before unhealthy when no schedule is set (env HEALTH_RUN_INTERVAL)
   -health-sync-grace        grace window for nodes to confirm the latest run (env HEALTH_SYNC_GRACE)
   -node-space-critical-pct  node free-space critical threshold (env NODE_SPACE_CRITICAL_PCT)
 
@@ -154,6 +155,14 @@ func runServe(args []string) {
 	}
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
+	// Create the output directory ourselves so a freshly deployed primary is
+	// self-sufficient (no external orchestration script needed) and its
+	// healthcheck can read it before the first run.
+	if err := os.MkdirAll(cfg.OutputDir, 0o750); err != nil {
+		fmt.Fprintln(os.Stderr, "error: cannot create output directory:", err)
 		os.Exit(1)
 	}
 
@@ -273,6 +282,7 @@ func runHealthcheck(args []string) {
 	res, err := health.Evaluate(health.Config{
 		OutputDir:        cfg.OutputDir,
 		Roster:           roster.Open(cfg.NodeRosterFile),
+		Schedule:         cfg.Schedule,
 		RunInterval:      cfg.RunInterval,
 		SyncGrace:        cfg.SyncGrace,
 		SpaceCriticalPct: cfg.SpaceCriticalPct,
