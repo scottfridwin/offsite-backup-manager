@@ -41,6 +41,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/offsite-backup-manager-${{ matrix.target }}
+          flavor: |
+            latest=false
           tags: |
             type=semver,pattern=v{{version}}
 
