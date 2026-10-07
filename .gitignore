@@ -26,7 +26,6 @@ roster.json
 
 # Build artifacts / dependencies
 dist/
-build/
 bin/
 out/
 node_modules/

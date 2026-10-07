@@ -4,7 +4,7 @@
 # than via dev container "features") so we control apt. The upstream image ships
 # a yarn apt source whose signing key has expired, which breaks `apt-get update`;
 # we remove it first.
-FROM mcr.microsoft.com/devcontainers/go:1-1.23-bookworm
+FROM mcr.microsoft.com/devcontainers/go:1.25-bookworm
 
 # Drop the broken yarn apt source (expired key NO_PUBKEY 62D54FD4003F6525).
 RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
