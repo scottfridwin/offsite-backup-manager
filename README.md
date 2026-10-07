@@ -46,6 +46,70 @@ Both also expose admin subcommands (`package`, `enroll-token`, `nodes`,
 `retire-node`, `capacity`, `healthcheck`) — see
 [`docs/usage.md`](docs/usage.md) for the full CLI reference.
 
+## Quick start
+
+1. **Generate an age keypair** — the Primary only ever holds the public half:
+
+   ```bash
+   age-keygen -o age-identity.txt
+   ```
+
+   Save the printed `Public key: age1...` as `AGE_RECIPIENT` below. Store
+   `age-identity.txt` somewhere safe (a password manager) and off the Primary
+   — it's only needed later to decrypt backups (see
+   [`docs/restore-runbook.md`](docs/restore-runbook.md)).
+
+2. **Generate a minisign keypair** — signs each run's manifest:
+
+   ```bash
+   minisign -G -p minisign.pub -s minisign.key
+   ```
+
+   `minisign.key` stays on the Primary (`MINISIGN_SECKEY`); `minisign.pub` is
+   copied to every node (`MINISIGN_PUBKEY`) to verify what it pulls.
+
+3. **Start the Primary** (needs to be reachable over HTTPS for nodes to reach
+   it — see [Deployment](#deployment) for a proxied, hardened setup):
+
+   ```bash
+   docker run -d --name backup-primary \
+     -v /srv/backups:/backups:ro \
+     -v ./minisign.key:/minisign.key:ro \
+     -v ./data:/data \
+     -e BACKUP_SOURCE_DIR=/backups \
+     -e PACKAGE_OUTPUT_DIR=/data/out \
+     -e NODE_ROSTER_FILE=/data/roster.json \
+     -e AGE_RECIPIENT=age1... \
+     -e MINISIGN_SECKEY=/minisign.key \
+     -p 8080:8080 \
+     ghcr.io/scottfridwin/offsite-backup-manager-primary:v0.1.0
+   ```
+
+4. **Mint a one-time enrollment token** for your first node:
+
+   ```bash
+   docker exec backup-primary /app enroll-token -roster /data/roster.json
+   ```
+
+5. **Configure and start a node**, pointed at the Primary with that token:
+
+   ```bash
+   docker run -d --name backup-node \
+     -v ./store:/store \
+     -v ./minisign.pub:/minisign.pub:ro \
+     -e BACKUP_HOST=backup.example.com \
+     -e ENROLLMENT_TOKEN=<token-from-step-4> \
+     -e NODE_LABEL=pi-garage \
+     -e STORE_DIR=/store \
+     -e MINISIGN_PUBKEY=/minisign.pub \
+     ghcr.io/scottfridwin/offsite-backup-manager-node:v0.1.0
+   ```
+
+   The node redeems the token once, then pulls, verifies, and heartbeats on
+   its own — no further interaction needed. See
+   [`docs/node-setup.md`](docs/node-setup.md) for provisioning a dedicated
+   device and [`docs/usage.md`](docs/usage.md) for every option.
+
 ## Deployment
 
 ```yaml
