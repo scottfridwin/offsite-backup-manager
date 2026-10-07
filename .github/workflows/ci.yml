@@ -65,3 +65,18 @@ jobs:
       - name: No Go code yet
         if: steps.detect.outputs.go == 'false'
         run: echo "No go.mod present yet — build/test/lint will activate once Go code lands."
+
+  docker-build:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Native-arch validation build only (no push) -- catches a broken or
+      # missing build/Dockerfile, build context, or build-arg before release
+      # time. Full multi-arch build + publish happens in release.yml on tag.
+      - name: Build primary image
+        run: docker build -f build/Dockerfile --build-arg TARGET=primary -t offsite-backup-manager-primary:ci .
+
+      - name: Build node image
+        run: docker build -f build/Dockerfile --build-arg TARGET=node -t offsite-backup-manager-node:ci .
