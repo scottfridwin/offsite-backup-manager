@@ -56,7 +56,6 @@ services:
   backup-node:
     image: ghcr.io/scottfridwin/offsite-backup-manager-node:v0.1.0
     container_name: backup-node
-    command: ["run"]
     restart: unless-stopped
     security_opt:
       - "no-new-privileges=true"
@@ -76,13 +75,12 @@ services:
       - PULL_INTERVAL=1h
       - CAPACITY_WARN_PCT=90
     volumes:
-      - /etc/localtime:/etc/localtime:ro
-      - ${DIR_DATA}/backup-node/store:/store
-      - ${DIR_CONFIG}/backup-node/minisign.pub:/config/minisign.pub:ro
+      - ./data/backup-node:/store
+      - ./config/minisign.pub:/config/minisign.pub:ro
 
 secrets:
   enrollment_token:
-    file: ${DIR_CONFIG}/backup-node/secrets/enrollment_token
+    file: ./secrets/enrollment_token
 ```
 
 The node needs no custom `networks:` entry (default bridge) — it only ever

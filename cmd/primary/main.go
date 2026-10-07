@@ -26,32 +26,34 @@ import (
 var version = "dev"
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+	// Default to "serve" (the image's primary function) so container usage
+	// needs no explicit command/CLI needs no subcommand for the common case.
+	cmd, args := "serve", os.Args[1:]
+	if len(args) > 0 {
+		cmd, args = args[0], args[1:]
 	}
 
-	switch os.Args[1] {
+	switch cmd {
 	case "package":
-		runPackage(os.Args[2:])
+		runPackage(args)
 	case "serve":
-		runServe(os.Args[2:])
+		runServe(args)
 	case "enroll-token":
-		runEnrollToken(os.Args[2:])
+		runEnrollToken(args)
 	case "healthcheck":
-		runHealthcheck(os.Args[2:])
+		runHealthcheck(args)
 	case "nodes":
-		runNodes(os.Args[2:])
+		runNodes(args)
 	case "retire-node":
-		runRetireNode(os.Args[2:])
+		runRetireNode(args)
 	case "capacity":
-		runCapacity(os.Args[2:])
+		runCapacity(args)
 	case "version", "-version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "-h", "--help":
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		usage()
 		os.Exit(2)
 	}
@@ -85,8 +87,8 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `offsite-backup-manager (primary) %s
 
 Usage:
+  primary [serve flags]         Serve the node-facing enroll/pull/heartbeat API (default)
   primary package [flags]       Build one encrypted, signed backup package
-  primary serve [flags]         Serve the node-facing enroll/pull/heartbeat API
   primary enroll-token [flags]  Issue a one-time node enrollment token
   primary healthcheck [flags]   Exit 0 if healthy, 1 if not (for Docker HEALTHCHECK)
   primary nodes [flags]         List enrolled nodes and their status
