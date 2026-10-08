@@ -23,6 +23,9 @@ type NodeConfig struct {
 	MinisignPubKeyFile string
 	// CapacityWarnPct is the local free-space warning threshold, 0-100 (CAPACITY_WARN_PCT).
 	CapacityWarnPct float64
+	// DownloadIdleTimeout aborts a package download only after this long with no
+	// progress (DOWNLOAD_IDLE_TIMEOUT); it never caps total transfer time.
+	DownloadIdleTimeout time.Duration
 }
 
 // NodeConfigFromEnv builds a NodeConfig from environment variables.
@@ -32,13 +35,14 @@ func NodeConfigFromEnv() (NodeConfig, error) {
 		return NodeConfig{}, err
 	}
 	return NodeConfig{
-		BackupHost:         envOr("BACKUP_HOST", ""),
-		EnrollmentToken:    enrollmentToken,
-		NodeLabel:          envOr("NODE_LABEL", ""),
-		PullInterval:       envDurationOr("PULL_INTERVAL", time.Hour),
-		StoreDir:           envOr("STORE_DIR", ""),
-		MinisignPubKeyFile: envOr("MINISIGN_PUBKEY", ""),
-		CapacityWarnPct:    envFloatOr("CAPACITY_WARN_PCT", 90),
+		BackupHost:          envOr("BACKUP_HOST", ""),
+		EnrollmentToken:     enrollmentToken,
+		NodeLabel:           envOr("NODE_LABEL", ""),
+		PullInterval:        envDurationOr("PULL_INTERVAL", time.Hour),
+		StoreDir:            envOr("STORE_DIR", ""),
+		MinisignPubKeyFile:  envOr("MINISIGN_PUBKEY", ""),
+		CapacityWarnPct:     envFloatOr("CAPACITY_WARN_PCT", 90),
+		DownloadIdleTimeout: envDurationOr("DOWNLOAD_IDLE_TIMEOUT", 2*time.Minute),
 	}, nil
 }
 
@@ -51,6 +55,7 @@ func (c *NodeConfig) BindFlags(fs *flag.FlagSet) {
 	fs.StringVar(&c.StoreDir, "store", c.StoreDir, "append-only package store directory (STORE_DIR)")
 	fs.StringVar(&c.MinisignPubKeyFile, "minisign-pubkey", c.MinisignPubKeyFile, "minisign public key file (MINISIGN_PUBKEY)")
 	fs.Float64Var(&c.CapacityWarnPct, "capacity-warn-pct", c.CapacityWarnPct, "local free-space warning threshold (CAPACITY_WARN_PCT)")
+	fs.DurationVar(&c.DownloadIdleTimeout, "download-idle-timeout", c.DownloadIdleTimeout, "abort a package download after this long with no progress (DOWNLOAD_IDLE_TIMEOUT)")
 }
 
 // Validate checks that the required fields are present.

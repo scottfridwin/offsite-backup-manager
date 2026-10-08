@@ -96,6 +96,7 @@ func TestAgentEnrollPullHeartbeat(t *testing.T) {
 	// Point the agent at the test TLS server instead of a real BACKUP_HOST.
 	a.baseURL = ts.URL
 	a.client = ts.Client()
+	a.dlClient = ts.Client()
 
 	ctx := context.Background()
 	pullToken, err := a.EnsureEnrolled(ctx)
@@ -197,7 +198,7 @@ func TestAgentRejectsTamperedManifest(t *testing.T) {
 	}
 	a.baseURL = ts.URL
 	a.client = ts.Client()
-
+	a.dlClient = ts.Client()
 	ctx := context.Background()
 	pullToken, err := a.EnsureEnrolled(ctx)
 	if err != nil {

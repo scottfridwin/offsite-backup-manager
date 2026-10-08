@@ -42,6 +42,11 @@ type Config struct {
 	MinisignPubKeyFile string
 	// CapacityWarnPct is the local free-space warning threshold, 0-100 (CAPACITY_WARN_PCT).
 	CapacityWarnPct float64
+	// DownloadIdleTimeout aborts a package download only if no bytes arrive for
+	// this long (DOWNLOAD_IDLE_TIMEOUT). Unlike a whole-request timeout it never
+	// caps the total transfer time, so multi-GB packages can download over slow
+	// links as long as they keep making progress. Defaults to 2 minutes.
+	DownloadIdleTimeout time.Duration
 
 	// HTTPClient overrides the default HTTP client (tests only).
 	HTTPClient *http.Client
@@ -62,6 +67,8 @@ type credential struct {
 type Agent struct {
 	cfg      Config
 	client   *http.Client
+	dlClient *http.Client
+	dlIdle   time.Duration
 	verifier *cryptoutil.Verifier
 	baseURL  string
 }
@@ -83,8 +90,25 @@ func New(cfg Config) (*Agent, error) {
 	if cfg.CapacityWarnPct <= 0 {
 		cfg.CapacityWarnPct = 90
 	}
+	if cfg.DownloadIdleTimeout <= 0 {
+		cfg.DownloadIdleTimeout = 2 * time.Minute
+	}
+	// The package download must not be bound by a whole-request timeout: an
+	// 8-20 GB package over a slow offsite link legitimately takes far longer
+	// than any fixed deadline. Small control requests keep a short overall
+	// timeout; the download instead relies on the idle/stall timeout below.
+	dlClient := cfg.HTTPClient
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 2 * time.Minute}
+		dlClient = &http.Client{
+			Transport: &http.Transport{
+				Proxy:                 http.ProxyFromEnvironment,
+				TLSHandshakeTimeout:   30 * time.Second,
+				ResponseHeaderTimeout: 2 * time.Minute,
+				ExpectContinueTimeout: 1 * time.Second,
+				IdleConnTimeout:       90 * time.Second,
+			},
+		}
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -101,6 +125,8 @@ func New(cfg Config) (*Agent, error) {
 	return &Agent{
 		cfg:      cfg,
 		client:   cfg.HTTPClient,
+		dlClient: dlClient,
+		dlIdle:   cfg.DownloadIdleTimeout,
 		verifier: verifier,
 		baseURL:  "https://" + cfg.BackupHost,
 	}, nil
@@ -338,9 +364,20 @@ func (a *Agent) fetchBytes(ctx context.Context, pullToken, path string) ([]byte,
 }
 
 // downloadToTemp streams path into a temp file under StoreDir, returning its
-// path, hex sha256, and byte count.
+// path, hex sha256, and byte count. The transfer is bounded only by an
+// idle/stall timeout (no whole-request deadline), so arbitrarily large
+// packages download successfully as long as bytes keep arriving.
 func (a *Agent) downloadToTemp(ctx context.Context, pullToken, path string) (string, string, int64, error) {
-	resp, err := a.authGet(ctx, path, pullToken)
+	dlCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, a.baseURL+path, nil)
+	if err != nil {
+		return "", "", 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+pullToken)
+
+	resp, err := a.dlClient.Do(req)
 	if err != nil {
 		return "", "", 0, err
 	}
@@ -356,13 +393,38 @@ func (a *Agent) downloadToTemp(ctx context.Context, pullToken, path string) (str
 	}
 	defer func() { _ = tmp.Close() }()
 
+	// Cancel the request if the body stalls (no bytes) for dlIdle; each
+	// successful read resets the watchdog.
+	idle := time.AfterFunc(a.dlIdle, cancel)
+	defer idle.Stop()
+	body := &stallReader{r: resp.Body, reset: func() { idle.Reset(a.dlIdle) }}
+
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, h), resp.Body)
+	n, err := io.Copy(io.MultiWriter(tmp, h), body)
 	if err != nil {
 		_ = os.Remove(tmp.Name())
+		if ctx.Err() == nil && dlCtx.Err() != nil {
+			return "", "", 0, fmt.Errorf("download stalled (no data for %s): %w", a.dlIdle, err)
+		}
 		return "", "", 0, err
 	}
 	return tmp.Name(), hex.EncodeToString(h.Sum(nil)), n, nil
+}
+
+// stallReader wraps a response body and invokes reset after any read that
+// returns data, letting a caller's watchdog distinguish a stalled stream from
+// a slow-but-progressing one.
+type stallReader struct {
+	r     io.Reader
+	reset func()
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if n > 0 {
+		s.reset()
+	}
+	return n, err
 }
 
 // Heartbeat reports liveness, free space, and the last synced run.
