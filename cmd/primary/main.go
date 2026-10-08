@@ -175,7 +175,10 @@ func runServe(args []string) {
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      5 * time.Minute, // package downloads can be large
+		// Fallback write cap for the small control endpoints; the package
+		// download handler overrides this with its own idle write deadline so
+		// multi-GB transfers are bounded by lack of progress, not total time.
+		WriteTimeout: 5 * time.Minute,
 	}
 
 	scheduler := startScheduler(cfg)
