@@ -16,7 +16,9 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/scottfridwin/offsite-backup-manager/internal/manifest"
 	"github.com/scottfridwin/offsite-backup-manager/internal/roster"
@@ -214,6 +216,15 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+// packageWriteIdleTimeout bounds a package download only by lack of progress:
+// the write deadline is pushed forward after every chunk that is written, so a
+// multi-GB transfer succeeds over a slow link while a stalled client is still
+// cut off. It is the server-side mirror of the node's download idle timeout.
+const (
+	packageWriteIdleTimeout = 2 * time.Minute
+	packageStreamChunkBytes = 1 << 20
+)
+
 func (s *server) handlePackage(w http.ResponseWriter, r *http.Request, _ roster.Node) {
 	name := r.PathValue("name")
 	if !packageNamePattern.MatchString(name) {
@@ -235,7 +246,34 @@ func (s *server) handlePackage(w http.ResponseWriter, r *http.Request, _ roster.
 	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	http.ServeContent(w, r, name, fi.ModTime(), f)
+	w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
+	w.Header().Set("Last-Modified", fi.ModTime().UTC().Format(http.TimeFormat))
+	w.WriteHeader(http.StatusOK)
+
+	rc := http.NewResponseController(w)
+	buf := make([]byte, packageStreamChunkBytes)
+	for {
+		if err := rc.SetWriteDeadline(time.Now().Add(packageWriteIdleTimeout)); err != nil {
+			// Deadline control unsupported (e.g. in tests): the fixed server
+			// WriteTimeout still applies, which is acceptable there.
+			_, _ = io.CopyBuffer(w, f, buf)
+			return
+		}
+		n, rerr := f.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				s.cfg.Logger.Warn("package stream aborted", "name", name, "error", werr)
+				return
+			}
+		}
+		if rerr == io.EOF {
+			return
+		}
+		if rerr != nil {
+			s.cfg.Logger.Warn("package read failed", "name", name, "error", rerr)
+			return
+		}
+	}
 }
 
 type heartbeatRequest struct {
