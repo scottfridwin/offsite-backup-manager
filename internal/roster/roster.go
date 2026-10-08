@@ -22,7 +22,15 @@ import (
 type Status string
 
 const (
-	// StatusActive nodes participate in distribution and may pull + heartbeat.
+	// StatusPending nodes have enrolled but not yet confirmed via a first
+	// heartbeat. They may authenticate (to pull and heartbeat) but are not
+	// counted as participants: they are excluded from distribution assignment
+	// and from the health check's required-confirmers set until they heartbeat.
+	// This keeps an enrolled-but-never-seen "phantom" from gating health or
+	// receiving run assignments it can never confirm.
+	StatusPending Status = "pending"
+	// StatusActive nodes have confirmed at least once and participate in
+	// distribution and health; they may pull + heartbeat.
 	StatusActive Status = "active"
 	// StatusRetired nodes have been decommissioned and can no longer authenticate.
 	StatusRetired Status = "retired"
@@ -171,8 +179,9 @@ func (s *Store) IssueEnrollmentToken(ttl time.Duration) (string, error) {
 }
 
 // Enroll redeems a one-time enrollment token: it burns the token and
-// registers a new active node, returning its durable pull token (returned to
-// the caller once and never stored in plaintext).
+// registers a new node (pending until its first heartbeat), returning its
+// durable pull token (returned to the caller once and never stored in
+// plaintext).
 func (s *Store) Enroll(enrollToken, label string) (Node, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -209,7 +218,7 @@ func (s *Store) Enroll(enrollToken, label string) (Node, string, error) {
 		ID:         nodeID,
 		Label:      label,
 		TokenHash:  hashToken(pullToken),
-		Status:     StatusActive,
+		Status:     StatusPending,
 		EnrolledAt: now,
 	}
 	doc.Nodes = append(doc.Nodes, node)
@@ -231,7 +240,7 @@ func (s *Store) Authenticate(pullToken string) (Node, error) {
 	}
 	hash := hashToken(pullToken)
 	for _, n := range doc.Nodes {
-		if n.Status == StatusActive && subtle.ConstantTimeCompare([]byte(n.TokenHash), []byte(hash)) == 1 {
+		if (n.Status == StatusActive || n.Status == StatusPending) && subtle.ConstantTimeCompare([]byte(n.TokenHash), []byte(hash)) == 1 {
 			return n, nil
 		}
 	}
@@ -249,6 +258,10 @@ func (s *Store) Heartbeat(nodeID string, freeBytes, totalBytes int64, lastRunID 
 	}
 	for i := range doc.Nodes {
 		if doc.Nodes[i].ID == nodeID {
+			// First heartbeat confirms a pending node into a real participant.
+			if doc.Nodes[i].Status == StatusPending {
+				doc.Nodes[i].Status = StatusActive
+			}
 			doc.Nodes[i].LastSeen = time.Now().UTC()
 			doc.Nodes[i].FreeBytes = freeBytes
 			doc.Nodes[i].TotalBytes = totalBytes

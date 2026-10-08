@@ -20,7 +20,7 @@ func TestEnrollAuthenticateHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enroll: %v", err)
 	}
-	if node.Label != "pi-garage" || node.Status != StatusActive {
+	if node.Label != "pi-garage" || node.Status != StatusPending {
 		t.Fatalf("unexpected node: %+v", node)
 	}
 
@@ -39,6 +39,14 @@ func TestEnrollAuthenticateHeartbeat(t *testing.T) {
 
 	if _, err := s.Authenticate("not-a-real-token"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for bad pull token, got %v", err)
+	}
+
+	// Before the first heartbeat the node is pending, so it is not yet counted
+	// among the active participants.
+	if pending, err := s.ActiveNodes(); err != nil {
+		t.Fatalf("active nodes (pre-heartbeat): %v", err)
+	} else if len(pending) != 0 {
+		t.Fatalf("expected no active nodes before first heartbeat, got %+v", pending)
 	}
 
 	if err := s.Heartbeat(node.ID, 100, 200, "run-20260101T000000Z"); err != nil {
@@ -97,8 +105,8 @@ func TestRetireAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.Status != StatusActive {
-		t.Fatalf("expected active, got %v", got.Status)
+	if got.Status != StatusPending {
+		t.Fatalf("expected pending, got %v", got.Status)
 	}
 
 	if err := s.Retire(node.ID); err != nil {
@@ -136,6 +144,14 @@ func TestNextRoundRobin(t *testing.T) {
 	a := enrollNode(t, s, "a")
 	b := enrollNode(t, s, "b")
 	c := enrollNode(t, s, "c")
+
+	// Round-robin only considers confirmed (active) nodes, so each must send a
+	// first heartbeat before it is assignable.
+	for _, n := range []Node{a, b, c} {
+		if err := s.Heartbeat(n.ID, 1, 2, ""); err != nil {
+			t.Fatalf("heartbeat %s: %v", n.Label, err)
+		}
+	}
 
 	ids := []string{a.ID, b.ID, c.ID}
 	sortedIDs := append([]string(nil), ids...)
