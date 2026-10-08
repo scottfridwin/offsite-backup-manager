@@ -62,6 +62,22 @@ func (s *Signer) Sign(message []byte) []byte {
 	return minisign.Sign(s.key, message)
 }
 
+// PublicKeyText returns the signer's minisign public key as the two-line
+// ".pub" file content (comment line + base64), ready to hand to a node for
+// manifest verification. It is derived from the private key, so no separate
+// public-key file is needed.
+func (s *Signer) PublicKeyText() (string, error) {
+	pub, ok := s.key.Public().(minisign.PublicKey)
+	if !ok {
+		return "", fmt.Errorf("unexpected minisign public key type %T", s.key.Public())
+	}
+	txt, err := pub.MarshalText()
+	if err != nil {
+		return "", fmt.Errorf("marshal minisign public key: %w", err)
+	}
+	return string(txt) + "\n", nil
+}
+
 // Verifier checks detached minisign signatures against a trusted public key.
 type Verifier struct {
 	key minisign.PublicKey

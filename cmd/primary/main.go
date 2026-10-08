@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/scottfridwin/offsite-backup-manager/internal/cryptoutil"
 	"github.com/scottfridwin/offsite-backup-manager/internal/health"
 	"github.com/scottfridwin/offsite-backup-manager/internal/pipeline"
+	"github.com/scottfridwin/offsite-backup-manager/internal/provision"
 	"github.com/scottfridwin/offsite-backup-manager/internal/roster"
 	"github.com/scottfridwin/offsite-backup-manager/internal/server"
 )
@@ -42,6 +44,8 @@ func main() {
 		runServe(args)
 	case "enroll-token":
 		runEnrollToken(args)
+	case "provision-node":
+		runProvisionNode(args)
 	case "healthcheck":
 		runHealthcheck(args)
 	case "nodes":
@@ -94,6 +98,7 @@ Usage:
   primary [serve flags]         Serve the node-facing enroll/pull/heartbeat API (default)
   primary package [flags]       Build one encrypted, signed backup package
   primary enroll-token [flags]  Issue a one-time node enrollment token
+  primary provision-node [flags] Render a zero-touch Raspberry Pi provisioning bundle
   primary healthcheck [flags]   Exit 0 if healthy, 1 if not (for Docker HEALTHCHECK)
   primary nodes [flags]         List enrolled nodes and their status
   primary retire-node <id>      Decommission a node (§5.4)
@@ -123,6 +128,19 @@ serve flags:
 enroll-token flags:
   -roster           node roster file (env NODE_ROSTER_FILE)
   -enroll-token-ttl enrollment token lifetime (env ENROLL_TOKEN_TTL)
+
+provision-node flags:
+  -label            node label to register (required)
+  -out              directory to write the provisioning bundle into (required)
+  -roster           node roster file (env NODE_ROSTER_FILE)
+  -backup-host      Primary endpoint the node pulls from (env BACKUP_HOST)
+  -minisign-key     minisign secret key file; its public key is embedded (env MINISIGN_SECKEY)
+  -node-image       node container image reference (default matches this version)
+  -node-user        unprivileged login user the node runs as (default backup)
+  -store            node append-only store path (default /srv/backup-node/store)
+  -pull-interval    how often the node polls (default 1h)
+  -capacity-warn-pct node free-space warning threshold (default 90)
+  -enroll-token-ttl enrollment token lifetime (default 4h; baked onto the card)
 
 healthcheck flags:
   -output                   directory serving published runs (env PACKAGE_OUTPUT_DIR)
@@ -268,6 +286,118 @@ func runEnrollToken(args []string) {
 
 	fmt.Println(token)
 	fmt.Fprintf(os.Stderr, "expires in %s; set as ENROLLMENT_TOKEN on the new node before first boot\n", cfg.EnrollTokenTTL)
+}
+
+// runProvisionNode issues a short-lived enrollment token and renders a
+// zero-touch Raspberry Pi provisioning bundle (dropped on the SD card's boot
+// partition) so a new node self-provisions on first boot with no SSH.
+func runProvisionNode(args []string) {
+	srvCfg := config.ServerConfigFromEnv()
+	pkgCfg, err := config.FromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
+	var (
+		label      string
+		backupHost = os.Getenv("BACKUP_HOST")
+		nodeImage  = "ghcr.io/scottfridwin/offsite-backup-manager-node:" + version
+		outDir     string
+		nodeUser   = "backup"
+		storeDir   = "/srv/backup-node/store"
+		pullEvery  = "1h"
+		warnPct    = 90
+		ttl        = 4 * time.Hour
+	)
+	fs := flag.NewFlagSet("provision-node", flag.ExitOnError)
+	fs.StringVar(&srvCfg.NodeRosterFile, "roster", srvCfg.NodeRosterFile, "node roster file (NODE_ROSTER_FILE)")
+	fs.StringVar(&pkgCfg.MinisignKeyFile, "minisign-key", pkgCfg.MinisignKeyFile, "minisign secret key file; its public key is embedded (MINISIGN_SECKEY)")
+	fs.StringVar(&label, "label", "", "node label to register (required)")
+	fs.StringVar(&backupHost, "backup-host", backupHost, "Primary endpoint the node pulls from (BACKUP_HOST)")
+	fs.StringVar(&nodeImage, "node-image", nodeImage, "node container image reference")
+	fs.StringVar(&outDir, "out", "", "directory to write the provisioning bundle into (required)")
+	fs.StringVar(&nodeUser, "node-user", nodeUser, "unprivileged login user the node runs as")
+	fs.StringVar(&storeDir, "store", storeDir, "node append-only store path")
+	fs.StringVar(&pullEvery, "pull-interval", pullEvery, "how often the node polls")
+	fs.IntVar(&warnPct, "capacity-warn-pct", warnPct, "node free-space warning threshold")
+	fs.DurationVar(&ttl, "enroll-token-ttl", ttl, "enrollment token lifetime (kept short; the token is baked onto the card)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	switch {
+	case srvCfg.NodeRosterFile == "":
+		fmt.Fprintln(os.Stderr, "error: a node roster file is required (set NODE_ROSTER_FILE or -roster)")
+		os.Exit(1)
+	case label == "":
+		fmt.Fprintln(os.Stderr, "error: -label is required")
+		os.Exit(1)
+	case backupHost == "":
+		fmt.Fprintln(os.Stderr, "error: a backup host is required (set BACKUP_HOST or -backup-host)")
+		os.Exit(1)
+	case outDir == "":
+		fmt.Fprintln(os.Stderr, "error: -out is required")
+		os.Exit(1)
+	case pkgCfg.MinisignKeyFile == "":
+		fmt.Fprintln(os.Stderr, "error: a minisign secret key is required (set MINISIGN_SECKEY or -minisign-key)")
+		os.Exit(1)
+	}
+
+	signer, err := cryptoutil.LoadSigner(pkgCfg.MinisignKeyFile, pkgCfg.MinisignPassword)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	pubKey, err := signer.PublicKeyText()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
+	token, err := roster.Open(srvCfg.NodeRosterFile).IssueEnrollmentToken(ttl)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
+	files, err := provision.Render(provision.Bundle{
+		BackupHost:      backupHost,
+		NodeLabel:       label,
+		NodeImage:       nodeImage,
+		EnrollmentToken: token,
+		MinisignPubKey:  pubKey,
+		NodeUser:        nodeUser,
+		StoreDir:        storeDir,
+		PullInterval:    pullEvery,
+		CapacityWarnPct: warnPct,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
+	if err := os.MkdirAll(outDir, 0o750); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	for name, content := range files {
+		mode := os.FileMode(0o644)
+		switch {
+		case name == "enrollment_token":
+			mode = 0o600
+		case strings.HasSuffix(name, ".sh"):
+			mode = 0o755
+		}
+		if err := os.WriteFile(filepath.Join(outDir, name), []byte(content), mode); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	}
+
+	fmt.Printf("provisioning bundle for node %q written to %s\n", label, outDir)
+	fmt.Printf("  enrollment token expires in %s\n", ttl)
+	fmt.Println("next: flash Raspberry Pi OS Lite (64-bit), then from the mounted boot partition run:")
+	fmt.Printf("  %s/install-to-boot.sh /path/to/boot\n", outDir)
 }
 
 func runHealthcheck(args []string) {
