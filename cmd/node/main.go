@@ -60,13 +60,14 @@ func runAgent(args []string) {
 	}
 
 	a, err := agent.New(agent.Config{
-		BackupHost:         cfg.BackupHost,
-		EnrollmentToken:    cfg.EnrollmentToken,
-		NodeLabel:          cfg.NodeLabel,
-		PullInterval:       cfg.PullInterval,
-		StoreDir:           cfg.StoreDir,
-		MinisignPubKeyFile: cfg.MinisignPubKeyFile,
-		CapacityWarnPct:    cfg.CapacityWarnPct,
+		BackupHost:          cfg.BackupHost,
+		EnrollmentToken:     cfg.EnrollmentToken,
+		NodeLabel:           cfg.NodeLabel,
+		PullInterval:        cfg.PullInterval,
+		StoreDir:            cfg.StoreDir,
+		MinisignPubKeyFile:  cfg.MinisignPubKeyFile,
+		CapacityWarnPct:     cfg.CapacityWarnPct,
+		DownloadIdleTimeout: cfg.DownloadIdleTimeout,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
