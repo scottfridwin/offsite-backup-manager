@@ -8,6 +8,7 @@ package provision
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"regexp"
 	"strings"
@@ -28,7 +29,7 @@ type Bundle struct {
 	// MinisignPubKey is the Primary's public key (.pub file content) the node
 	// uses to verify manifests. Not secret.
 	MinisignPubKey string
-	// NodeUser is the unprivileged login user the node runs as (default "backup").
+	// NodeUser is the unprivileged login user the node runs as (default "backupnode").
 	NodeUser string
 	// StoreDir is the node's append-only store path (default /srv/backup-node/store).
 	StoreDir string
@@ -48,11 +49,13 @@ var (
 	reToken    = regexp.MustCompile(`^[a-f0-9]{32,}$`)
 )
 
-// Render validates b and returns the bundle files keyed by filename. Every file
-// is written to the SD card's boot partition by install-to-boot.sh.
+// Render validates b and returns the bundle files keyed by filename: a
+// cloud-init "user-data" and "meta-data" (dropped on the SD card's boot
+// partition) plus a README. On modern Raspberry Pi OS (Debian 12/13) cloud-init
+// is the first-boot mechanism, so the node self-provisions with no SSH.
 func Render(b Bundle) (map[string]string, error) {
 	if b.NodeUser == "" {
-		b.NodeUser = "backup"
+		b.NodeUser = "backupnode"
 	}
 	if b.StoreDir == "" {
 		b.StoreDir = "/srv/backup-node/store"
@@ -85,18 +88,23 @@ func Render(b Bundle) (map[string]string, error) {
 		return nil, fmt.Errorf("capacity warn pct %d out of range 1-100", b.CapacityWarnPct)
 	}
 
-	files := map[string]string{
-		"minisign.pub":     ensureTrailingNewline(b.MinisignPubKey),
-		"enrollment_token": b.EnrollmentToken,
+	script, err := render(provisionScriptTmpl, b)
+	if err != nil {
+		return nil, fmt.Errorf("render provision script: %w", err)
 	}
-	for name, tmpl := range templates {
-		rendered, err := render(tmpl, b)
-		if err != nil {
-			return nil, fmt.Errorf("render %s: %w", name, err)
-		}
-		files[name] = rendered
+	userData, err := renderUserData(b, script)
+	if err != nil {
+		return nil, fmt.Errorf("render user-data: %w", err)
 	}
-	return files, nil
+	readme, err := render(readmeTmpl, b)
+	if err != nil {
+		return nil, fmt.Errorf("render README: %w", err)
+	}
+	return map[string]string{
+		"user-data":  userData,
+		"meta-data":  renderMetaData(b),
+		"README.txt": readme,
+	}, nil
 }
 
 func ensureTrailingNewline(s string) string {
@@ -118,55 +126,73 @@ func render(tmpl string, b Bundle) (string, error) {
 	return buf.String(), nil
 }
 
-var templates = map[string]string{
-	"firstrun.sh":                   firstRunTmpl,
-	"provision.sh":                  provisionTmpl,
-	"backup-node-provision.service": serviceTmpl,
-	"install-to-boot.sh":            installTmpl,
-	"README.txt":                    readmeTmpl,
+// indent prefixes every non-empty line with pad, for embedding a multi-line
+// file body under a YAML block scalar.
+func indent(s, pad string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i, l := range lines {
+		if l != "" {
+			lines[i] = pad + l
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
-// firstRunTmpl runs once, very early (pre-network), via systemd.run in
-// cmdline.txt. It must NOT do anything network-dependent; it only relocates the
-// materials off the FAT boot partition, installs the post-network provisioner,
-// masks the interactive first-boot wizard, scrubs the one-time token from the
-// card, and triggers a reboot into the normal system.
-const firstRunTmpl = `#!/bin/bash
-# offsite-backup-manager node first-boot stage (auto-generated). Runs pre-network.
-set -euo pipefail
+// renderMetaData returns the cloud-init NoCloud meta-data.
+func renderMetaData(b Bundle) string {
+	return fmt.Sprintf("instance-id: backup-node-%s\nlocal-hostname: %s\n", b.NodeLabel, b.NodeLabel)
+}
 
-log() { echo "[backup-node firstrun] $*"; }
+// renderUserData embeds the provisioning script, public key, and one-time token
+// into a cloud-init #cloud-config that self-provisions the node on first boot.
+func renderUserData(b Bundle, script string) (string, error) {
+	t, err := template.New("u").Parse(userDataTmpl)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	err = t.Execute(&buf, map[string]string{
+		"Label":    b.NodeLabel,
+		"PubKey":   indent(ensureTrailingNewline(b.MinisignPubKey), "      "),
+		"TokenB64": base64.StdEncoding.EncodeToString([]byte(b.EnrollmentToken)),
+		"Script":   indent(script, "      "),
+	})
+	if err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
 
-BOOT=/boot/firmware
-[ -d "$BOOT" ] || BOOT=/boot
-
-DEST=/var/lib/backup-node-provision
-install -d -m 0700 "$DEST"
-install -m 0644 "$BOOT/minisign.pub"     "$DEST/minisign.pub"
-install -m 0600 "$BOOT/enrollment_token" "$DEST/enrollment_token"
-install -m 0755 "$BOOT/provision.sh"     /usr/local/sbin/backup-node-provision.sh
-install -m 0644 "$BOOT/backup-node-provision.service" /etc/systemd/system/backup-node-provision.service
-
-systemctl enable backup-node-provision.service
-# Suppress the interactive first-boot user wizard on headless Lite images.
-systemctl mask userconfig.service 2>/dev/null || true
-
-# Scrub provisioning materials (including the one-time token) from the card.
-rm -f "$BOOT"/firstrun.sh "$BOOT"/provision.sh "$BOOT"/backup-node-provision.service \
-      "$BOOT"/minisign.pub "$BOOT"/enrollment_token "$BOOT"/install-to-boot.sh \
-      "$BOOT"/README.txt || true
-# Remove our one-shot hook so this never runs again.
-sed -i 's# systemd.run=[^ ]*##g; s# systemd.run_success_action=[^ ]*##g; s# systemd.run_failure_action=[^ ]*##g; s# systemd.unit=kernel-command-line.target##g' "$BOOT/cmdline.txt" 2>/dev/null || true
-
-log "staged; rebooting into post-network provisioning"
+// userDataTmpl is the cloud-init NoCloud user-data: it writes the materials and
+// the provisioning script to disk, then runs the script once after boot.
+const userDataTmpl = `#cloud-config
+hostname: {{.Label}}
+write_files:
+  - path: /var/lib/backup-node-provision/minisign.pub
+    permissions: '0644'
+    owner: root:root
+    content: |
+{{.PubKey}}
+  - path: /var/lib/backup-node-provision/enrollment_token
+    permissions: '0600'
+    owner: root:root
+    encoding: b64
+    content: {{.TokenB64}}
+  - path: /usr/local/sbin/backup-node-provision.sh
+    permissions: '0755'
+    owner: root:root
+    content: |
+{{.Script}}
+runcmd:
+  - [ /bin/bash, /usr/local/sbin/backup-node-provision.sh ]
 `
 
-// provisionTmpl runs once after the network is up (invoked by the systemd
-// oneshot unit). It does all the network/podman work, then disables itself and
-// shreds the token.
-const provisionTmpl = `#!/bin/bash
+// provisionScriptTmpl is the provisioning payload embedded in the cloud-init
+// user-data and run once (after network) by runcmd on first boot.
+const provisionScriptTmpl = `#!/bin/bash
 # offsite-backup-manager node post-network provisioner (auto-generated).
 set -euo pipefail
+cd /
 
 NODE_USER="{{.NodeUser}}"
 BACKUP_HOST="{{.BackupHost}}"
@@ -177,15 +203,28 @@ PULL_INTERVAL="{{.PullInterval}}"
 CAPACITY_WARN_PCT="{{.CapacityWarnPct}}"
 DEST=/var/lib/backup-node-provision
 
+# Mirror all output to the boot partition so a failure is readable even from a
+# machine that can only see the FAT partition (e.g. Windows).
+BOOT=/boot/firmware
+[ -d "$BOOT" ] || BOOT=/boot
+exec > >(tee -a "$BOOT/provision.log") 2>&1
+
 log() { echo "[backup-node provision] $*"; }
 
-# 1. Unprivileged node user (no interactive login).
+# 1. Unprivileged node user (no interactive login). It must be a NON-system user
+#    so it gets an /etc/subuid range for rootless podman; names like "backup"
+#    are reserved system accounts on Debian and will not work.
 if ! id -u "$NODE_USER" >/dev/null 2>&1; then
   useradd --create-home --shell /usr/sbin/nologin "$NODE_USER"
 fi
 NODE_UID="$(id -u "$NODE_USER")"
+NODE_HOME="$(getent passwd "$NODE_USER" | cut -d: -f6)"
+if ! grep -q "^${NODE_USER}:" /etc/subuid; then
+  log "error: $NODE_USER has no /etc/subuid range; rootless podman needs one (use a non-system user name)"
+  exit 1
+fi
 
-# 2. Container runtime (Raspberry Pi OS Bookworm ships podman 4.3.x).
+# 2. Container runtime (installed from the distro; version varies by release).
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y podman
@@ -198,6 +237,7 @@ for _ in $(seq 1 30); do [ -S "${RUNTIME_DIR}/bus" ] && break; sleep 1; done
 
 run_as_user() {
   sudo -u "$NODE_USER" env \
+    HOME="$NODE_HOME" \
     XDG_RUNTIME_DIR="$RUNTIME_DIR" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=${RUNTIME_DIR}/bus" "$@"
 }
@@ -210,8 +250,9 @@ install -d -o "$NODE_USER" -g "$NODE_USER" "$STORE_PARENT" "$STORE_DIR"
 install -o "$NODE_USER" -g "$NODE_USER" -m 0644 "$DEST/minisign.pub" "$STORE_PARENT/minisign.pub"
 run_as_user podman unshare chown -R 65532:65532 "$STORE_DIR"
 
-# 5. One-time enrollment token -> rootless podman secret.
-run_as_user podman secret create enrollment_token "$DEST/enrollment_token"
+# 5. One-time enrollment token -> rootless podman secret. The token file is
+#    root-owned (0600), so feed it via stdin; the rootless user cannot read it.
+cat "$DEST/enrollment_token" | run_as_user podman secret create enrollment_token -
 
 # 6. Run the node (rootless, restart-on-boot). Outbound-only; stores ciphertext.
 run_as_user podman run -d --name backup-node --restart=always \
@@ -230,75 +271,37 @@ run_as_user podman run -d --name backup-node --restart=always \
 
 run_as_user systemctl --user enable podman-restart.service || true
 
-# 7. Self-disable and shred the token; the node is now autonomous.
-systemctl disable backup-node-provision.service || true
+# 7. Shred the token and remove it from the card; the node is now autonomous
+#    (cloud-init runs this only once per instance).
 shred -u "$DEST/enrollment_token" 2>/dev/null || rm -f "$DEST/enrollment_token"
+rm -f "$BOOT/user-data" || true
 
 log "node $NODE_LABEL provisioned against $BACKUP_HOST"
 `
 
-const serviceTmpl = `[Unit]
-Description=Offsite backup node first-boot provisioner
-After=network-online.target
-Wants=network-online.target
-ConditionPathExists=/usr/local/sbin/backup-node-provision.sh
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/backup-node-provision.sh
-RemainAfterExit=no
-
-[Install]
-WantedBy=multi-user.target
-`
-
-// installTmpl runs on the operator's workstation against the mounted boot
-// partition. It copies the bundle and adds the one-shot firstrun hook.
-const installTmpl = `#!/usr/bin/env bash
-# Copy this node bundle onto a freshly imaged Raspberry Pi OS boot partition.
-# Usage: ./install-to-boot.sh /path/to/mounted/boot-partition
-set -euo pipefail
-
-BOOT="${1:-}"
-if [ -z "$BOOT" ] || [ ! -f "$BOOT/cmdline.txt" ]; then
-  echo "usage: $0 /path/to/mounted/boot-partition (must contain cmdline.txt)" >&2
-  exit 1
-fi
-
-HERE="$(cd "$(dirname "$0")" && pwd)"
-for f in firstrun.sh provision.sh backup-node-provision.service minisign.pub enrollment_token; do
-  cp "$HERE/$f" "$BOOT/$f"
-done
-chmod 0700 "$BOOT/enrollment_token" || true
-
-# Add the one-shot firstrun hook to cmdline.txt (single line, idempotent).
-CMD="$(tr -d '\n' < "$BOOT/cmdline.txt")"
-case "$CMD" in
-  *systemd.run=*) : ;; # already hooked
-  *) CMD="$CMD systemd.run=/boot/firstrun.sh systemd.run_success_action=reboot systemd.run_failure_action=reboot systemd.unit=kernel-command-line.target" ;;
-esac
-printf '%s\n' "$CMD" > "$BOOT/cmdline.txt"
-
-echo "Bundle installed to $BOOT. Eject the card and boot the Pi; it self-provisions."
-`
-
-const readmeTmpl = `Offsite backup node — zero-touch provisioning bundle
-====================================================
+const readmeTmpl = `Offsite backup node — zero-touch provisioning (cloud-init)
+=========================================================
 
 Node label : {{.NodeLabel}}
 Primary    : {{.BackupHost}}
 Image      : {{.NodeImage}}
 
-Steps (no SSH / no interaction with the Pi):
-  1. Flash Raspberry Pi OS Lite (64-bit) to the SD card (plain image is fine).
-  2. With the card still mounted, run:  ./install-to-boot.sh /path/to/boot
+Steps (no SSH; works from Windows, macOS, or Linux):
+  1. Flash Raspberry Pi OS Lite (64-bit) with Raspberry Pi Imager. If it offers
+     OS customisation you can decline it; our cloud-init config is used either
+     way (just make sure to overwrite user-data and meta-data in the next step).
+  2. The card has a small FAT partition (label "bootfs"). Copy BOTH of these
+     files from this bundle onto it, replacing any existing copies:
+        user-data
+        meta-data
   3. Eject the card and boot the Pi (wired Ethernet, DHCP).
   4. Watch it enroll on the Primary:
         primary nodes -roster <ROSTER>
-     It appears 'pending', then 'active' after its first heartbeat.
+     It appears 'pending', then 'active' after its first heartbeat. If something
+     fails, read provision.log on the "bootfs" partition.
 
 Security:
-  - enrollment_token is one-time and short-lived; it is scrubbed from the card
-    and the Pi after the node enrolls.
+  - The enrollment token is one-time and short-lived; it is removed from the
+    card and shredded on the node after enrollment.
   - The node stores only encrypted packages it cannot decrypt.
 `
