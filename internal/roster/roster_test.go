@@ -3,9 +3,44 @@ package roster
 import (
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
+
+// TestConcurrentIssueTokensAcrossStores simulates multiple processes (each a
+// distinct Store sharing only the file + flock, not the in-process mutex)
+// issuing tokens concurrently; the cross-process lock must preserve every
+// append rather than losing updates to a read-modify-write race (#17).
+func TestConcurrentIssueTokensAcrossStores(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "roster.json")
+	const n = 25
+
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := Open(path).IssueEnrollmentToken(time.Hour); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("issue token: %v", err)
+	}
+
+	doc, err := Open(path).load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(doc.Pending) != n {
+		t.Fatalf("expected %d pending tokens, got %d (lost to a race)", n, len(doc.Pending))
+	}
+}
 
 func TestEnrollAuthenticateHeartbeat(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "roster.json")
