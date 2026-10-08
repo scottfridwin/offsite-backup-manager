@@ -121,6 +121,9 @@ func New(cfg Config) (*Agent, error) {
 	if err := os.MkdirAll(cfg.StoreDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create store dir: %w", err)
 	}
+	if err := checkStoreWritable(cfg.StoreDir); err != nil {
+		return nil, err
+	}
 
 	return &Agent{
 		cfg:      cfg,
@@ -134,6 +137,24 @@ func New(cfg Config) (*Agent, error) {
 
 func (a *Agent) credentialPath() string {
 	return filepath.Join(a.cfg.StoreDir, credentialFileName)
+}
+
+// checkStoreWritable fails fast with actionable guidance when STORE_DIR is not
+// writable by the (nonroot, uid 65532) container user. The usual cause is a
+// rootless bind mount still owned by the host user; catching it here avoids a
+// confusing mid-enrollment "permission denied" that would also burn the
+// one-time enrollment token.
+func checkStoreWritable(dir string) error {
+	probe, err := os.CreateTemp(dir, ".writecheck-*")
+	if err != nil {
+		return fmt.Errorf("store directory %q is not writable by this container user: %w; "+
+			"on rootless podman/docker make it owned by the container user, e.g. "+
+			"`podman unshare chown -R 65532:65532 <host store path>`", dir, err)
+	}
+	name := probe.Name()
+	_ = probe.Close()
+	_ = os.Remove(name)
+	return nil
 }
 
 // EnsureEnrolled returns the node's durable pull credential, enrolling with

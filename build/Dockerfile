@@ -16,7 +16,9 @@ RUN CGO_ENABLED=0 go build -trimpath \
 
 FROM gcr.io/distroless/static:nonroot
 COPY --from=build /out/app /app
-USER nonroot:nonroot
+# Numeric UID:GID (distroless 'nonroot') so Config.User is identical on every
+# arch; the string form resolved inconsistently across amd64/arm64 builds.
+USER 65532:65532
 ENTRYPOINT ["/app"]
 # On primary this gates real run/sync confirmation (docs/requirements.md §9.2);
 # on node it's liveness-only (no shell/curl in this distroless image).
