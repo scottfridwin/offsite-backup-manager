@@ -16,6 +16,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Status is the lifecycle state of a roster node.
@@ -69,8 +71,10 @@ type document struct {
 	RotationCursor string `json:"rotation_cursor,omitempty"`
 }
 
-// Store is a file-backed roster. It is safe for concurrent use by a single
-// process (the Primary server); it is not designed for multi-process access.
+// Store is a file-backed roster. Read-modify-write operations are serialized
+// both within a process (mutex) and across processes (an advisory flock on a
+// sidecar lock file), so a separate process such as
+// `docker exec <primary> /app enroll-token` cannot race the running server.
 type Store struct {
 	mu   sync.Mutex
 	path string
@@ -132,6 +136,32 @@ func (s *Store) save(doc document) error {
 	return os.Rename(tmpPath, s.path)
 }
 
+// withFileLock runs fn while holding the in-process mutex and an advisory OS
+// lock (flock) on a sidecar lock file, making read-modify-write safe across
+// processes. The lock file is separate from the roster file so the atomic
+// temp+rename save is unaffected.
+func (s *Store) withFileLock(fn func() error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if dir := filepath.Dir(s.path); dir != "." {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return err
+		}
+	}
+	lock, err := os.OpenFile(s.path+".lock", os.O_CREATE|os.O_RDWR, 0o640)
+	if err != nil {
+		return fmt.Errorf("open roster lock: %w", err)
+	}
+	defer func() { _ = lock.Close() }()
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX); err != nil {
+		return fmt.Errorf("lock roster: %w", err)
+	}
+	defer func() { _ = unix.Flock(int(lock.Fd()), unix.LOCK_UN) }()
+
+	return fn()
+}
+
 func hashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
@@ -161,18 +191,18 @@ func (s *Store) IssueEnrollmentToken(ttl time.Duration) (string, error) {
 		return "", err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	doc, err := s.load()
-	if err != nil {
-		return "", err
-	}
-	doc.Pending = append(doc.Pending, pendingToken{
-		TokenHash: hashToken(token),
-		ExpiresAt: time.Now().UTC().Add(ttl),
+	err = s.withFileLock(func() error {
+		doc, err := s.load()
+		if err != nil {
+			return err
+		}
+		doc.Pending = append(doc.Pending, pendingToken{
+			TokenHash: hashToken(token),
+			ExpiresAt: time.Now().UTC().Add(ttl),
+		})
+		return s.save(doc)
 	})
-	if err := s.save(doc); err != nil {
+	if err != nil {
 		return "", err
 	}
 	return token, nil
@@ -183,47 +213,49 @@ func (s *Store) IssueEnrollmentToken(ttl time.Duration) (string, error) {
 // durable pull token (returned to the caller once and never stored in
 // plaintext).
 func (s *Store) Enroll(enrollToken, label string) (Node, string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	doc, err := s.load()
-	if err != nil {
-		return Node{}, "", err
-	}
-
-	hash := hashToken(enrollToken)
-	now := time.Now().UTC()
-	idx := -1
-	for i, p := range doc.Pending {
-		if subtle.ConstantTimeCompare([]byte(p.TokenHash), []byte(hash)) == 1 && now.Before(p.ExpiresAt) {
-			idx = i
-			break
+	var node Node
+	var pullToken string
+	err := s.withFileLock(func() error {
+		doc, err := s.load()
+		if err != nil {
+			return err
 		}
-	}
-	if idx == -1 {
-		return Node{}, "", ErrInvalidToken
-	}
-	// Burn the token (remove it) regardless of what happens next.
-	doc.Pending = append(doc.Pending[:idx], doc.Pending[idx+1:]...)
 
-	nodeID, err := newNodeID()
-	if err != nil {
-		return Node{}, "", err
-	}
-	pullToken, err := newToken()
-	if err != nil {
-		return Node{}, "", err
-	}
-	node := Node{
-		ID:         nodeID,
-		Label:      label,
-		TokenHash:  hashToken(pullToken),
-		Status:     StatusPending,
-		EnrolledAt: now,
-	}
-	doc.Nodes = append(doc.Nodes, node)
+		hash := hashToken(enrollToken)
+		now := time.Now().UTC()
+		idx := -1
+		for i, p := range doc.Pending {
+			if subtle.ConstantTimeCompare([]byte(p.TokenHash), []byte(hash)) == 1 && now.Before(p.ExpiresAt) {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			return ErrInvalidToken
+		}
+		// Burn the token (remove it) regardless of what happens next.
+		doc.Pending = append(doc.Pending[:idx], doc.Pending[idx+1:]...)
 
-	if err := s.save(doc); err != nil {
+		nodeID, err := newNodeID()
+		if err != nil {
+			return err
+		}
+		pt, err := newToken()
+		if err != nil {
+			return err
+		}
+		pullToken = pt
+		node = Node{
+			ID:         nodeID,
+			Label:      label,
+			TokenHash:  hashToken(pt),
+			Status:     StatusPending,
+			EnrolledAt: now,
+		}
+		doc.Nodes = append(doc.Nodes, node)
+		return s.save(doc)
+	})
+	if err != nil {
 		return Node{}, "", err
 	}
 	return node, pullToken, nil
@@ -249,29 +281,28 @@ func (s *Store) Authenticate(pullToken string) (Node, error) {
 
 // Heartbeat records liveness, capacity, and sync progress for nodeID.
 func (s *Store) Heartbeat(nodeID string, freeBytes, totalBytes int64, lastRunID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	doc, err := s.load()
-	if err != nil {
-		return err
-	}
-	for i := range doc.Nodes {
-		if doc.Nodes[i].ID == nodeID {
-			// First heartbeat confirms a pending node into a real participant.
-			if doc.Nodes[i].Status == StatusPending {
-				doc.Nodes[i].Status = StatusActive
-			}
-			doc.Nodes[i].LastSeen = time.Now().UTC()
-			doc.Nodes[i].FreeBytes = freeBytes
-			doc.Nodes[i].TotalBytes = totalBytes
-			if lastRunID != "" {
-				doc.Nodes[i].LastRunID = lastRunID
-			}
-			return s.save(doc)
+	return s.withFileLock(func() error {
+		doc, err := s.load()
+		if err != nil {
+			return err
 		}
-	}
-	return fmt.Errorf("heartbeat: unknown node %q", nodeID)
+		for i := range doc.Nodes {
+			if doc.Nodes[i].ID == nodeID {
+				// First heartbeat confirms a pending node into a real participant.
+				if doc.Nodes[i].Status == StatusPending {
+					doc.Nodes[i].Status = StatusActive
+				}
+				doc.Nodes[i].LastSeen = time.Now().UTC()
+				doc.Nodes[i].FreeBytes = freeBytes
+				doc.Nodes[i].TotalBytes = totalBytes
+				if lastRunID != "" {
+					doc.Nodes[i].LastRunID = lastRunID
+				}
+				return s.save(doc)
+			}
+		}
+		return fmt.Errorf("heartbeat: unknown node %q", nodeID)
+	})
 }
 
 // ActiveNodes returns all nodes with status active, for distribution
@@ -327,20 +358,19 @@ func (s *Store) Get(nodeID string) (Node, error) {
 // assigned future runs. Its existing data on its own media is untouched —
 // the Primary has no path to reach or wipe it.
 func (s *Store) Retire(nodeID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	doc, err := s.load()
-	if err != nil {
-		return err
-	}
-	for i := range doc.Nodes {
-		if doc.Nodes[i].ID == nodeID {
-			doc.Nodes[i].Status = StatusRetired
-			return s.save(doc)
+	return s.withFileLock(func() error {
+		doc, err := s.load()
+		if err != nil {
+			return err
 		}
-	}
-	return ErrNotFound
+		for i := range doc.Nodes {
+			if doc.Nodes[i].ID == nodeID {
+				doc.Nodes[i].Status = StatusRetired
+				return s.save(doc)
+			}
+		}
+		return ErrNotFound
+	})
 }
 
 // NextRoundRobin returns the next active node in rotation for round-robin
@@ -348,36 +378,37 @@ func (s *Store) Retire(nodeID string) error {
 // cycling through the current active set. Active nodes are ordered by ID for
 // a stable rotation.
 func (s *Store) NextRoundRobin() (Node, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	var next Node
+	err := s.withFileLock(func() error {
+		doc, err := s.load()
+		if err != nil {
+			return err
+		}
 
-	doc, err := s.load()
+		var active []Node
+		for _, n := range doc.Nodes {
+			if n.Status == StatusActive {
+				active = append(active, n)
+			}
+		}
+		if len(active) == 0 {
+			return fmt.Errorf("round-robin: no active nodes")
+		}
+		sort.Slice(active, func(i, j int) bool { return active[i].ID < active[j].ID })
+
+		nextIdx := 0
+		for i, n := range active {
+			if n.ID == doc.RotationCursor {
+				nextIdx = (i + 1) % len(active)
+				break
+			}
+		}
+
+		next = active[nextIdx]
+		doc.RotationCursor = next.ID
+		return s.save(doc)
+	})
 	if err != nil {
-		return Node{}, err
-	}
-
-	var active []Node
-	for _, n := range doc.Nodes {
-		if n.Status == StatusActive {
-			active = append(active, n)
-		}
-	}
-	if len(active) == 0 {
-		return Node{}, fmt.Errorf("round-robin: no active nodes")
-	}
-	sort.Slice(active, func(i, j int) bool { return active[i].ID < active[j].ID })
-
-	nextIdx := 0
-	for i, n := range active {
-		if n.ID == doc.RotationCursor {
-			nextIdx = (i + 1) % len(active)
-			break
-		}
-	}
-
-	next := active[nextIdx]
-	doc.RotationCursor = next.ID
-	if err := s.save(doc); err != nil {
 		return Node{}, err
 	}
 	return next, nil
