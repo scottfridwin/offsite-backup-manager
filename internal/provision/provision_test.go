@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"encoding/base64"
 	"os/exec"
 	"strings"
 	"testing"
@@ -16,39 +17,41 @@ func validBundle() Bundle {
 	}
 }
 
-func TestRenderProducesBundleFiles(t *testing.T) {
+func TestRenderProducesCloudInitFiles(t *testing.T) {
 	files, err := Render(validBundle())
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	for _, want := range []string{
-		"firstrun.sh", "provision.sh", "backup-node-provision.service",
-		"install-to-boot.sh", "minisign.pub", "enrollment_token", "README.txt",
-	} {
+	for _, want := range []string{"user-data", "meta-data", "README.txt"} {
 		if _, ok := files[want]; !ok {
 			t.Fatalf("missing bundle file %q", want)
 		}
 	}
 
-	// The one-time token and the embedded config land where expected.
-	if got := files["enrollment_token"]; got != strings.Repeat("ab", 32) {
-		t.Fatalf("enrollment_token content = %q", got)
+	ud := files["user-data"]
+	if !strings.HasPrefix(ud, "#cloud-config\n") {
+		t.Fatalf("user-data must start with #cloud-config, got: %.20q", ud)
 	}
-	if !strings.Contains(files["provision.sh"], `BACKUP_HOST="backup.example.com"`) {
-		t.Fatalf("provision.sh missing backup host")
+	// The one-time token is embedded base64-encoded.
+	wantB64 := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("ab", 32)))
+	if !strings.Contains(ud, "content: "+wantB64) {
+		t.Fatalf("user-data missing base64 token")
 	}
-	if !strings.Contains(files["provision.sh"], `NODE_LABEL="pi-garage"`) {
-		t.Fatalf("provision.sh missing node label")
+	// The embedded provisioning script carries the config + the fixes.
+	for _, marker := range []string{
+		`BACKUP_HOST="backup.example.com"`,
+		`NODE_LABEL="pi-garage"`,
+		`NODE_USER="backupnode"`, // non-reserved user (fixes the 'backup' collision)
+		"65532:65532",
+		"podman secret create enrollment_token -", // token via stdin
+	} {
+		if !strings.Contains(ud, marker) {
+			t.Fatalf("user-data embedded script missing %q", marker)
+		}
 	}
-	if !strings.Contains(files["provision.sh"], "65532:65532") {
-		t.Fatalf("provision.sh missing nonroot store chown")
-	}
-	// Defaults applied.
-	if !strings.Contains(files["provision.sh"], `PULL_INTERVAL="1h"`) {
-		t.Fatalf("provision.sh missing default pull interval")
-	}
-	if !strings.Contains(files["provision.sh"], `NODE_USER="backup"`) {
-		t.Fatalf("provision.sh missing default node user")
+
+	if md := files["meta-data"]; !strings.Contains(md, "instance-id: backup-node-pi-garage") {
+		t.Fatalf("meta-data missing instance-id, got: %q", md)
 	}
 }
 
@@ -73,22 +76,20 @@ func TestRenderRejectsBadInput(t *testing.T) {
 	}
 }
 
-// TestRenderedShellScriptsAreValid syntax-checks the generated shell scripts
-// with `bash -n` so a template typo can't ship a broken provisioner.
-func TestRenderedShellScriptsAreValid(t *testing.T) {
+// TestProvisionScriptIsValidBash syntax-checks the embedded provisioning script
+// so a template typo can't ship a broken provisioner.
+func TestProvisionScriptIsValidBash(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		t.Skip("bash not available")
 	}
-	files, err := Render(validBundle())
+	script, err := render(provisionScriptTmpl, validBundle())
 	if err != nil {
-		t.Fatalf("render: %v", err)
+		t.Fatalf("render script: %v", err)
 	}
-	for _, name := range []string{"firstrun.sh", "provision.sh", "install-to-boot.sh"} {
-		cmd := exec.Command(bash, "-n")
-		cmd.Stdin = strings.NewReader(files[name])
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("%s failed bash -n: %v\n%s", name, err, out)
-		}
+	cmd := exec.Command(bash, "-n")
+	cmd.Stdin = strings.NewReader(script)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("provision script failed bash -n: %v\n%s", err, out)
 	}
 }

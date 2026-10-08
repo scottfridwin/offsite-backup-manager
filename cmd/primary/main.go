@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -136,7 +135,7 @@ provision-node flags:
   -backup-host      Primary endpoint the node pulls from (env BACKUP_HOST)
   -minisign-key     minisign secret key file; its public key is embedded (env MINISIGN_SECKEY)
   -node-image       node container image reference (default matches this version)
-  -node-user        unprivileged login user the node runs as (default backup)
+  -node-user        unprivileged login user the node runs as (default backupnode)
   -store            node append-only store path (default /srv/backup-node/store)
   -pull-interval    how often the node polls (default 1h)
   -capacity-warn-pct node free-space warning threshold (default 90)
@@ -304,7 +303,7 @@ func runProvisionNode(args []string) {
 		backupHost = os.Getenv("BACKUP_HOST")
 		nodeImage  = "ghcr.io/scottfridwin/offsite-backup-manager-node:" + version
 		outDir     string
-		nodeUser   = "backup"
+		nodeUser   = "backupnode"
 		storeDir   = "/srv/backup-node/store"
 		pullEvery  = "1h"
 		warnPct    = 90
@@ -382,11 +381,8 @@ func runProvisionNode(args []string) {
 	}
 	for name, content := range files {
 		mode := os.FileMode(0o644)
-		switch {
-		case name == "enrollment_token":
-			mode = 0o600
-		case strings.HasSuffix(name, ".sh"):
-			mode = 0o755
+		if name == "user-data" {
+			mode = 0o600 // contains the one-time enrollment token
 		}
 		if err := os.WriteFile(filepath.Join(outDir, name), []byte(content), mode); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
@@ -396,8 +392,8 @@ func runProvisionNode(args []string) {
 
 	fmt.Printf("provisioning bundle for node %q written to %s\n", label, outDir)
 	fmt.Printf("  enrollment token expires in %s\n", ttl)
-	fmt.Println("next: flash Raspberry Pi OS Lite (64-bit), then from the mounted boot partition run:")
-	fmt.Printf("  %s/install-to-boot.sh /path/to/boot\n", outDir)
+	fmt.Println("next: flash Raspberry Pi OS Lite (64-bit), then copy user-data + meta-data")
+	fmt.Printf("  from %s onto the card's 'bootfs' partition and boot the Pi.\n", outDir)
 }
 
 func runHealthcheck(args []string) {
