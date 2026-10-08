@@ -109,6 +109,11 @@ func Evaluate(cfg Config) (Result, error) {
 	// the latest run has elapsed (eventual consistency, §9.1).
 	if age > cfg.SyncGrace {
 		for _, node := range requiredNodes(*latest, active) {
+			// A node that has never heartbeated isn't a participant yet (it may
+			// have enrolled but never confirmed), so it can't gate health.
+			if node.LastSeen.IsZero() {
+				continue
+			}
 			if node.LastRunID < latest.RunID {
 				reasons = append(reasons, fmt.Sprintf("node %s (%s) has not confirmed run %s (last confirmed: %q)", node.Label, node.ID, latest.RunID, node.LastRunID))
 			}

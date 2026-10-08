@@ -165,6 +165,11 @@ func enrollNode(t *testing.T, s *roster.Store, label string) roster.Node {
 	if err != nil {
 		t.Fatalf("enroll %s: %v", label, err)
 	}
+	// A node only becomes an assignable participant once it confirms via a
+	// first heartbeat.
+	if err := s.Heartbeat(node.ID, 1, 2, ""); err != nil {
+		t.Fatalf("heartbeat %s: %v", label, err)
+	}
 	return node
 }
 

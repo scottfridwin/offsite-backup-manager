@@ -186,8 +186,14 @@ func TestEvaluateUnhealthyAfterGraceWithoutConfirmation(t *testing.T) {
 	outputDir := t.TempDir()
 	store := roster.Open(filepath.Join(t.TempDir(), "roster.json"))
 	tok, _ := store.IssueEnrollmentToken(time.Hour)
-	if _, _, err := store.Enroll(tok, "pi-garage"); err != nil {
+	node, _, err := store.Enroll(tok, "pi-garage")
+	if err != nil {
 		t.Fatalf("enroll: %v", err)
+	}
+	// The node is a real participant (it confirmed an earlier run) but has not
+	// confirmed the latest one, so after grace the Primary must be unhealthy.
+	if err := store.Heartbeat(node.ID, 100, 200, "20251231T000000Z"); err != nil {
+		t.Fatalf("heartbeat: %v", err)
 	}
 
 	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
@@ -203,6 +209,32 @@ func TestEvaluateUnhealthyAfterGraceWithoutConfirmation(t *testing.T) {
 	}
 	if res.Healthy {
 		t.Fatal("expected unhealthy once grace window elapses without confirmation")
+	}
+}
+
+// A node that enrolled but never heartbeated is not a confirmed participant and
+// must not keep the Primary unhealthy forever (#16).
+func TestEvaluatePhantomNodeDoesNotGateHealth(t *testing.T) {
+	outputDir := t.TempDir()
+	store := roster.Open(filepath.Join(t.TempDir(), "roster.json"))
+	tok, _ := store.IssueEnrollmentToken(time.Hour)
+	if _, _, err := store.Enroll(tok, "phantom"); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+
+	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	writeRun(t, outputDir, newManifestAt("20260101T000000Z", now.Add(-7*time.Hour), manifest.SchemeReplicateAll, nil))
+
+	res, err := Evaluate(Config{
+		OutputDir: outputDir, Roster: store,
+		RunInterval: 24 * time.Hour, SyncGrace: 6 * time.Hour, SpaceCriticalPct: 90,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if !res.Healthy {
+		t.Fatalf("expected healthy (a never-confirmed node must not gate health), got reasons: %v", res.Reasons)
 	}
 }
 
