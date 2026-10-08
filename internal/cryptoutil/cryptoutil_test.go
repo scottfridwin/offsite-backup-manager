@@ -76,6 +76,33 @@ func TestSignAndVerify(t *testing.T) {
 	}
 }
 
+func TestSignerPublicKeyText(t *testing.T) {
+	_, priv, err := minisign.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	signer := NewSigner(priv)
+
+	pubText, err := signer.PublicKeyText()
+	if err != nil {
+		t.Fatalf("public key text: %v", err)
+	}
+
+	// The derived text must be a valid .pub file the verifier can load.
+	pubPath := filepath.Join(t.TempDir(), "minisign.pub")
+	if err := os.WriteFile(pubPath, []byte(pubText), 0o640); err != nil {
+		t.Fatalf("write public key: %v", err)
+	}
+	verifier, err := LoadVerifier(pubPath)
+	if err != nil {
+		t.Fatalf("load verifier from derived key: %v", err)
+	}
+	msg := []byte("manifest contents")
+	if !verifier.Verify(msg, signer.Sign(msg)) {
+		t.Fatal("signature did not verify against derived public key")
+	}
+}
+
 func TestLoadVerifier(t *testing.T) {
 	pub, priv, err := minisign.GenerateKey(rand.Reader)
 	if err != nil {
