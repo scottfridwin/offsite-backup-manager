@@ -1,0 +1,55 @@
+name: Image vulnerability scan
+
+on:
+  # Scan each newly published :main image, and the released :latest image weekly
+  workflow_run:
+    workflows: ["Build, Test & Publish"]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+  # renovate: datasource=docker depName=aquasec/trivy
+  TRIVY_IMAGE: aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+
+jobs:
+  scan:
+    name: Trivy ${{ matrix.target }}
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [primary, node]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Scan image
+        env:
+          IMAGE: ${{ env.REGISTRY }}/offsite-backup-manager-${{ matrix.target }}
+          TAG: ${{ github.event_name == 'workflow_run' && 'main' || 'latest' }}
+        run: |
+          # Report-only: findings go to code scanning instead of failing the build
+          trivy() {
+            docker run --rm -v "$PWD:/out" -v "$RUNNER_TEMP/trivy:/root/.cache/trivy" "$TRIVY_IMAGE" \
+              image --severity "HIGH,CRITICAL" --ignore-unfixed "$@"
+          }
+          trivy --format sarif --output /out/trivy.sarif "${IMAGE}:${TAG}"
+          trivy --skip-db-update "${IMAGE}:${TAG}"
+
+      - name: Upload results to code scanning
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          sarif_file: trivy.sarif
+          category: trivy-image-${{ matrix.target }}

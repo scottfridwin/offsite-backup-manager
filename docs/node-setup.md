@@ -36,9 +36,8 @@ fine — just don't commit it anywhere).
 make docker-node   # builds ghcr.io/scottfridwin/offsite-backup-manager-node:<version> locally
 ```
 
-For Raspberry Pi (`arm64`/`armv7`), cross-build with Docker buildx, or pull the
-published image once this project publishes to GHCR (see the main
-[README](../README.md) — image names are provisional pre-release).
+Or pull the published multi-arch image (`amd64`, `arm64`, `armv7`) from GHCR; see
+the main [README](../README.md#images) for the tags.
 
 ## 3. Prepare the node's persistent storage
 
@@ -54,7 +53,7 @@ Example `docker-compose.yml` (adjust paths/image/version for your setup):
 ```yaml
 services:
   backup-node:
-    image: ghcr.io/scottfridwin/offsite-backup-manager-node:v0.1.0
+    image: ghcr.io/scottfridwin/offsite-backup-manager-node:latest
     container_name: backup-node
     restart: unless-stopped
     security_opt:
@@ -104,7 +103,7 @@ docker run -d --name backup-node --restart unless-stopped \
   -e MINISIGN_PUBKEY=/config/minisign.pub \
   -v /srv/backup-node/store:/store \
   -v /srv/backup-node/minisign.pub:/config/minisign.pub:ro \
-  ghcr.io/scottfridwin/offsite-backup-manager-node:v0.1.0 run
+  ghcr.io/scottfridwin/offsite-backup-manager-node:latest run
 ```
 
 On first start, the agent redeems `ENROLLMENT_TOKEN` against `BACKUP_HOST`,
