@@ -3,9 +3,10 @@
 # Usage: make <target>
 
 GO            ?= go
-VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# Image tags have no "v" prefix (git tag v1.2.3 -> image 1.2.3); the primary uses
+# VERSION as the default node image tag.
+VERSION       ?= $(patsubst v%,%,$(shell git describe --tags --always --dirty 2>/dev/null || echo dev))
 LDFLAGS       := -s -w -X main.version=$(VERSION)
-GO_VERSION    ?= 1.25
 IMAGE_PREFIX  ?= ghcr.io/scottfridwin/offsite-backup-manager
 
 .PHONY: all build build-primary build-node test lint vet tidy fmt clean \

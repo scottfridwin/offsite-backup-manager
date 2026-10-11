@@ -1,6 +1,6 @@
 # offsite-backup-manager
 
-[![CI](https://github.com/scottfridwin/offsite-backup-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/scottfridwin/offsite-backup-manager/actions/workflows/ci.yml)
+[![CI](https://github.com/scottfridwin/offsite-backup-manager/actions/workflows/build.yml/badge.svg)](https://github.com/scottfridwin/offsite-backup-manager/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/scottfridwin/offsite-backup-manager)](https://github.com/scottfridwin/offsite-backup-manager/releases)
 [![Go version](https://img.shields.io/github/go-mod/go-version/scottfridwin/offsite-backup-manager)](go.mod)
 [![License](https://img.shields.io/github/license/scottfridwin/offsite-backup-manager)](LICENSE)
@@ -34,8 +34,10 @@ gets encrypted copies **off-site** with:
 
 ## Images
 
-Published to GHCR on tagged releases, tagged with that exact `vX.Y.Z` (no
-`latest`), multi-arch (`linux/amd64`, `linux/arm64`, `linux/arm/v7`):
+Published to GHCR, multi-arch (`linux/amd64`, `linux/arm64`, `linux/arm/v7`), with
+an SBOM and signed build provenance. Every merge to `main` publishes `:main` and
+`:sha-<commit>`; releases add `:X.Y.Z`, `:X.Y`, `:X` and `:latest` (releases up to
+0.3.1 used `:vX.Y.Z`). Pin an exact version in production:
 
 | Image | Default command | Does |
 |---|---|---|
@@ -53,7 +55,7 @@ Both also expose admin subcommands (`package`, `enroll-token`, `nodes`,
 
    ```bash
    docker run --rm -v "$PWD":/out \
-     ghcr.io/scottfridwin/offsite-backup-manager-primary:v0.1.0 \
+     ghcr.io/scottfridwin/offsite-backup-manager-primary:latest \
      keygen -out /out -minisign-password <your-passphrase>
    ```
 
@@ -80,7 +82,7 @@ Both also expose admin subcommands (`package`, `enroll-token`, `nodes`,
      -e AGE_RECIPIENT=age1... \
      -e MINISIGN_SECKEY=/minisign.key \
      -p 8080:8080 \
-     ghcr.io/scottfridwin/offsite-backup-manager-primary:v0.1.0
+     ghcr.io/scottfridwin/offsite-backup-manager-primary:latest
    ```
 
 3. **Mint a one-time enrollment token** for your first node:
@@ -100,7 +102,7 @@ Both also expose admin subcommands (`package`, `enroll-token`, `nodes`,
      -e NODE_LABEL=pi-garage \
      -e STORE_DIR=/store \
      -e MINISIGN_PUBKEY=/minisign.pub \
-     ghcr.io/scottfridwin/offsite-backup-manager-node:v0.1.0
+     ghcr.io/scottfridwin/offsite-backup-manager-node:latest
    ```
 
    The node redeems the token once, then pulls, verifies, and heartbeats on
@@ -113,7 +115,7 @@ Both also expose admin subcommands (`package`, `enroll-token`, `nodes`,
 ```yaml
 services:
   backup-primary:
-    image: ghcr.io/scottfridwin/offsite-backup-manager-primary:v0.1.0
+    image: ghcr.io/scottfridwin/offsite-backup-manager-primary:latest
     restart: unless-stopped
     security_opt:
       - "no-new-privileges=true"

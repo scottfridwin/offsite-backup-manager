@@ -4,7 +4,7 @@
 # than via dev container "features") so we control apt. The upstream image ships
 # a yarn apt source whose signing key has expired, which breaks `apt-get update`;
 # we remove it first.
-FROM mcr.microsoft.com/devcontainers/go:1.25-bookworm
+FROM mcr.microsoft.com/devcontainers/go:1.27-bookworm
 
 # Drop the broken yarn apt source (expired key NO_PUBKEY 62D54FD4003F6525).
 RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
@@ -15,10 +15,11 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends age minisign \
  && rm -rf /var/lib/apt/lists/*
 
-# golangci-lint v2 (prebuilt binary; independent of the image's Go version, and
-# matches the v2 config in .golangci.yml / the v7 action used in CI).
-RUN curl -fsSL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
-      | sh -s -- -b /usr/local/bin
+# golangci-lint v2 (prebuilt binary; independent of the image's Go version).
+# Keep in step with GOLANGCI_LINT_VERSION in .github/workflows/build.yml.
+ARG GOLANGCI_LINT_VERSION=v2.14.0
+RUN curl -fsSL "https://raw.githubusercontent.com/golangci/golangci-lint/${GOLANGCI_LINT_VERSION}/install.sh" \
+      | sh -s -- -b /usr/local/bin "${GOLANGCI_LINT_VERSION}"
 
 # GitHub CLI, installed from the release tarball (no extra apt repo/keys).
 RUN set -eux; \

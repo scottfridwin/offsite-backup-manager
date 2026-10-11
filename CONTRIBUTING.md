@@ -43,21 +43,31 @@ Branch from the latest `main`, push, open a PR, keep it up to date with `main`.
 
 ## Local checks before pushing
 
-Once the Go module exists:
+These mirror the required `Lint` and `Test` checks:
 
 ```bash
-go build ./...
-go vet ./...
-go test ./...
-# golangci-lint run   # if installed
+make lint vet test
+GOARCH=386 go test ./...   # 32-bit, like the arm/v7 Pi nodes
 ```
 
 ## Releasing
 
-Push a `vX.Y.Z` tag on `main` (e.g. `git tag -s v0.1.0 && git push origin v0.1.0`)
-to trigger [`.github/workflows/release.yml`](.github/workflows/release.yml),
-which builds and publishes both multi-arch images to GHCR tagged with that
-exact version (no `latest`).
+Releases are automatic. [`build.yml`](.github/workflows/build.yml) runs on every
+merge to `main`: it publishes `:main` and `:sha-<commit>` of both images, and when
+the merge changes the Go code, `go.mod`/`go.sum` or `build/Dockerfile` it also
+releases. The squash-merge commit subject picks the version bump:
+
+- `feat:` → minor
+- `type!:` or a `BREAKING CHANGE` footer → major
+- anything else → patch
+
+The release job retags the published images as `X.Y.Z`, `X.Y`, `X` and `latest`,
+pushes the `vX.Y.Z` git tag and creates the GitHub release. The version is decided
+before the images are built, because the primary embeds it as the default node
+image tag (`offsite-backup-manager-node:X.Y.Z`) for `provision-node`.
+
+To release a specific version, run the workflow manually with `release_tag`
+(e.g. `v1.2.0`).
 
 ## Code of conduct
 

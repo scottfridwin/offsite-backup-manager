@@ -1,0 +1,44 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Image version
+      description: The image tags or digests you are running (primary and node).
+      placeholder: ghcr.io/scottfridwin/offsite-backup-manager-primary:1.2.0
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Primary
+        - Node
+        - Node provisioning
+        - Restore
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host
+      description: Host OS and architecture, and the container runtime.
+      placeholder: Raspberry Pi OS Lite 32-bit (arm/v7), podman 4.3
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Container log
+      description: Remove tokens, host names and anything else you do not want to share.
+      render: text
