@@ -288,6 +288,13 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request, node ro
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	// Reported values feed capacity planning and the health check (which
+	// compares last_run_id against the newest run), so reject nonsense.
+	if req.FreeBytes < 0 || req.TotalBytes < 0 || req.FreeBytes > req.TotalBytes ||
+		(req.LastRunID != "" && !manifest.ValidRunID(req.LastRunID)) {
+		writeError(w, http.StatusBadRequest, "invalid heartbeat")
+		return
+	}
 	if err := s.cfg.Roster.Heartbeat(node.ID, req.FreeBytes, req.TotalBytes, req.LastRunID); err != nil {
 		s.cfg.Logger.Error("heartbeat failed", "error", err, "node_id", node.ID)
 		writeError(w, http.StatusInternalServerError, "heartbeat failed")

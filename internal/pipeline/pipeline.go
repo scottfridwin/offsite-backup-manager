@@ -5,13 +5,16 @@ package pipeline
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
 
 	"filippo.io/age"
+	"golang.org/x/sys/unix"
 
 	"github.com/scottfridwin/offsite-backup-manager/internal/archive"
 	"github.com/scottfridwin/offsite-backup-manager/internal/config"
@@ -35,6 +38,23 @@ type Result struct {
 
 type countWriter struct{ n int64 }
 
+// lockOutputDir takes an exclusive, non-blocking lock on outputDir and
+// returns its release function.
+func lockOutputDir(outputDir string) (func(), error) {
+	f, err := os.OpenFile(filepath.Join(outputDir, ".package.lock"), os.O_CREATE|os.O_RDWR, 0o640)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return nil, errors.New("another packaging run is in progress")
+		}
+		return nil, fmt.Errorf("lock output dir: %w", err)
+	}
+	return func() { _ = f.Close() }, nil
+}
+
 func (c *countWriter) Write(p []byte) (int, error) {
 	c.n += int64(len(p))
 	return len(p), nil
@@ -56,7 +76,23 @@ func Run(cfg config.Config, version string) (Result, error) {
 		return Result{}, err
 	}
 
+	if err := os.MkdirAll(cfg.OutputDir, 0o750); err != nil {
+		return Result{}, err
+	}
+	// The scheduler and a manual `package` can overlap; their run IDs (one
+	// second resolution) and staging dirs would collide, so allow one at a time.
+	unlock, err := lockOutputDir(cfg.OutputDir)
+	if err != nil {
+		return Result{}, err
+	}
+	defer unlock()
+
 	runID := time.Now().UTC().Format(RunIDFormat)
+	pkgName := "run-" + runID + ".tar.zst.age"
+	pkgPath := filepath.Join(cfg.OutputDir, pkgName)
+	if _, err := os.Stat(pkgPath); err == nil {
+		return Result{}, fmt.Errorf("run %s already exists; retry in a second", runID)
+	}
 
 	stagedDir, err := stage.QuiesceAndStage(cfg.SourceDir, cfg.WorkDir, runID, stage.DefaultOptions())
 	if err != nil {
@@ -64,15 +100,11 @@ func Run(cfg config.Config, version string) (Result, error) {
 	}
 	defer func() { _ = os.RemoveAll(stagedDir) }()
 
-	if err := os.MkdirAll(cfg.OutputDir, 0o750); err != nil {
-		return Result{}, err
-	}
-
-	pkgName := "run-" + runID + ".tar.zst.age"
-	pkgPath := filepath.Join(cfg.OutputDir, pkgName)
 	stats, size, sum, err := writePackage(pkgPath, stagedDir, recipients)
 	if err != nil {
-		_ = os.Remove(pkgPath)
+		if !errors.Is(err, fs.ErrExist) {
+			_ = os.Remove(pkgPath)
+		}
 		return Result{}, fmt.Errorf("package: %w", err)
 	}
 
@@ -118,7 +150,8 @@ func Run(cfg config.Config, version string) (Result, error) {
 // writePackage streams the staged tree through tar -> zstd -> age into pkgPath,
 // computing the ciphertext size and SHA-256 as it goes.
 func writePackage(pkgPath, stagedDir string, recipients []age.Recipient) (archive.Stats, int64, string, error) {
-	f, err := os.Create(pkgPath)
+	// O_EXCL: a published run is never overwritten.
+	f, err := os.OpenFile(pkgPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
 	if err != nil {
 		return archive.Stats{}, 0, "", err
 	}

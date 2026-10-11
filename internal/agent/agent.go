@@ -58,6 +58,13 @@ type Config struct {
 // StoreDir once enrollment succeeds.
 const credentialFileName = ".node-credential.json"
 
+// Bounds on what the agent reads from the Primary into memory (packages are
+// streamed to disk instead), so a misbehaving Primary can't exhaust a node.
+const (
+	maxResponseBytes  = 8 << 20
+	maxErrorBodyBytes = 4 << 10
+)
+
 type credential struct {
 	NodeID    string `json:"node_id"`
 	PullToken string `json:"pull_token"`
@@ -191,15 +198,14 @@ func (a *Agent) EnsureEnrolled(ctx context.Context) (string, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("enroll failed: %s: %s", resp.Status, string(b))
+		return "", fmt.Errorf("enroll failed: %s: %s", resp.Status, errorBody(resp))
 	}
 
 	var out struct {
 		NodeID    string `json:"node_id"`
 		PullToken string `json:"pull_token"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil {
 		return "", fmt.Errorf("decode enroll response: %w", err)
 	}
 
@@ -221,6 +227,29 @@ type runSummary struct {
 	PackageURL   string `json:"package_url"`
 }
 
+// validate rejects a run whose ID or URLs differ from what the Primary
+// produces. The ID becomes part of store file names and the URLs are appended
+// to the Primary's base URL (carrying the pull token), so neither may be
+// trusted as-is: the run listing itself is not signed.
+func (r runSummary) validate() error {
+	if !manifest.ValidRunID(r.RunID) {
+		return fmt.Errorf("invalid run id %q", r.RunID)
+	}
+	base := "/packages/run-" + r.RunID
+	if r.ManifestURL != base+".manifest.json" ||
+		r.SignatureURL != base+".manifest.json.minisig" ||
+		r.PackageURL != base+".tar.zst.age" {
+		return fmt.Errorf("unexpected artifact URLs for run %s", r.RunID)
+	}
+	return nil
+}
+
+// errorBody returns the start of a non-success response body for error messages.
+func errorBody(resp *http.Response) string {
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+	return string(b)
+}
+
 // RunOnce fetches the list of runs the Primary knows about and pulls any that
 // are not already in the store, verifying each before it is kept. It returns
 // the most recent run ID successfully synced (possibly already-synced), for
@@ -234,6 +263,13 @@ func (a *Agent) RunOnce(ctx context.Context, pullToken string) (string, error) {
 	lastSynced := ""
 	var firstErr error
 	for _, run := range runs {
+		if err := run.validate(); err != nil {
+			a.cfg.Logger.Error("rejected run from primary", "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
 		pkgPath := filepath.Join(a.cfg.StoreDir, "run-"+run.RunID+".tar.zst.age")
 		if fileExists(pkgPath) {
 			lastSynced = run.RunID
@@ -263,13 +299,12 @@ func (a *Agent) fetchRuns(ctx context.Context, pullToken string) ([]runSummary, 
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("fetch runs: %s: %s", resp.Status, string(b))
+		return nil, fmt.Errorf("fetch runs: %s: %s", resp.Status, errorBody(resp))
 	}
 	var out struct {
 		Runs []runSummary `json:"runs"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode runs response: %w", err)
 	}
 	return out.Runs, nil
@@ -378,10 +413,16 @@ func (a *Agent) fetchBytes(ctx context.Context, pullToken, path string) ([]byte,
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("%s: %s: %s", path, resp.Status, string(b))
+		return nil, fmt.Errorf("%s: %s: %s", path, resp.Status, errorBody(resp))
 	}
-	return io.ReadAll(resp.Body)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxResponseBytes {
+		return nil, fmt.Errorf("%s: response larger than %d bytes", path, maxResponseBytes)
+	}
+	return b, nil
 }
 
 // downloadToTemp streams path into a temp file under StoreDir, returning its
@@ -404,8 +445,7 @@ func (a *Agent) downloadToTemp(ctx context.Context, pullToken, path string) (str
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return "", "", 0, fmt.Errorf("%s: %s: %s", path, resp.Status, string(b))
+		return "", "", 0, fmt.Errorf("%s: %s: %s", path, resp.Status, errorBody(resp))
 	}
 
 	tmp, err := os.CreateTemp(a.cfg.StoreDir, ".download-*.tmp")
@@ -476,8 +516,7 @@ func (a *Agent) Heartbeat(ctx context.Context, pullToken, lastRunID string) erro
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNoContent {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("heartbeat failed: %s: %s", resp.Status, string(b))
+		return fmt.Errorf("heartbeat failed: %s: %s", resp.Status, errorBody(resp))
 	}
 
 	if total > 0 {

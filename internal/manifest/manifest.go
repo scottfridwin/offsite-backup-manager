@@ -5,11 +5,21 @@ package manifest
 
 import (
 	"encoding/json"
+	"regexp"
 	"time"
 )
 
 // SchemaVersion is the manifest schema version. Bump on breaking changes.
 const SchemaVersion = 1
+
+// runIDPattern matches the UTC timestamp layout of run identifiers.
+var runIDPattern = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z$`)
+
+// ValidRunID reports whether id is a well-formed run identifier. Run IDs end
+// up in file names, so anything else must be rejected.
+func ValidRunID(id string) bool {
+	return runIDPattern.MatchString(id)
+}
 
 // Distribution scheme names (§8).
 const (
