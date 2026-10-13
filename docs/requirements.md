@@ -354,6 +354,11 @@ alerting, Kubernetes liveness, etc.) then surfaces and routes the alert.
   window **no eligible node** has confirmed the latest run — i.e. "unable to get this
   backup to any node." This is the signal the operator's existing health management
   turns into an alert.
+- *Decided (2026-10):* "no eligible node" means enrolled nodes that fail to
+  confirm. A Primary with **no nodes enrolled yet** stays healthy while its runs
+  succeed; a failed run is unhealthy immediately (until a later run succeeds),
+  and an active node that stops sending heartbeats is unhealthy after
+  `HEALTH_NODE_STALE`.
 - Rationale: this needs **nothing on the node** and no coupling to a specific
   alerting system, so it works on day one regardless of orchestrator.
 

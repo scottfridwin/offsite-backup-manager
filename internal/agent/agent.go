@@ -10,12 +10,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -58,6 +62,14 @@ type Config struct {
 // StoreDir once enrollment succeeds.
 const credentialFileName = ".node-credential.json"
 
+// incomingDirName holds in-progress files. Finished files are hard-linked
+// from here into StoreDir, which only ever gains entries, so StoreDir itself
+// can be made append-only (`chattr +a`) by the host.
+const incomingDirName = ".incoming"
+
+// spaceReserve is kept free on the store beyond a package's size.
+const spaceReserve = 64 << 20
+
 // Bounds on what the agent reads from the Primary into memory (packages are
 // streamed to disk instead), so a misbehaving Primary can't exhaust a node.
 const (
@@ -78,6 +90,8 @@ type Agent struct {
 	dlIdle   time.Duration
 	verifier *cryptoutil.Verifier
 	baseURL  string
+
+	lastRunID atomic.Value // string: newest run held, reported by heartbeats
 }
 
 // New validates cfg and returns a ready-to-use Agent.
@@ -114,6 +128,9 @@ func New(cfg Config) (*Agent, error) {
 				ResponseHeaderTimeout: 2 * time.Minute,
 				ExpectContinueTimeout: 1 * time.Second,
 				IdleConnTimeout:       90 * time.Second,
+				// Packages are encrypted (incompressible); a proxy compressing
+				// them only costs CPU and hides Content-Length.
+				DisableCompression: true,
 			},
 		}
 	}
@@ -128,18 +145,63 @@ func New(cfg Config) (*Agent, error) {
 	if err := os.MkdirAll(cfg.StoreDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create store dir: %w", err)
 	}
-	if err := checkStoreWritable(cfg.StoreDir); err != nil {
+	incoming := filepath.Join(cfg.StoreDir, incomingDirName)
+	if err := os.MkdirAll(incoming, 0o700); err != nil {
+		return nil, fmt.Errorf("create %s: %w", incoming, err)
+	}
+	if err := checkStoreWritable(incoming); err != nil {
 		return nil, err
 	}
 
-	return &Agent{
+	a := &Agent{
 		cfg:      cfg,
 		client:   cfg.HTTPClient,
 		dlClient: dlClient,
 		dlIdle:   cfg.DownloadIdleTimeout,
 		verifier: verifier,
 		baseURL:  "https://" + cfg.BackupHost,
-	}, nil
+	}
+	a.lastRunID.Store(a.newestStoredRun())
+	a.cleanIncoming()
+	return a, nil
+}
+
+func (a *Agent) incomingPath(name string) string {
+	return filepath.Join(a.cfg.StoreDir, incomingDirName, name)
+}
+
+// newestStoredRun returns the newest run whose package is in the store.
+func (a *Agent) newestStoredRun() string {
+	matches, _ := filepath.Glob(filepath.Join(a.cfg.StoreDir, "run-*.tar.zst.age"))
+	newest := ""
+	for _, m := range matches {
+		id := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(m), "run-"), ".tar.zst.age")
+		if manifest.ValidRunID(id) && id > newest {
+			newest = id
+		}
+	}
+	return newest
+}
+
+// cleanIncoming removes what an interrupted cycle left behind, keeping only
+// partial downloads of runs not yet stored (they are resumed).
+func (a *Agent) cleanIncoming() {
+	entries, err := os.ReadDir(filepath.Join(a.cfg.StoreDir, incomingDirName))
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasSuffix(name, ".partial") && !fileExists(filepath.Join(a.cfg.StoreDir, strings.TrimSuffix(name, ".partial"))) {
+			continue
+		}
+		_ = os.RemoveAll(a.incomingPath(name))
+	}
+	// Downloads from before .incoming existed.
+	stale, _ := filepath.Glob(filepath.Join(a.cfg.StoreDir, ".download-*.tmp"))
+	for _, p := range stale {
+		_ = os.Remove(p)
+	}
 }
 
 func (a *Agent) credentialPath() string {
@@ -214,7 +276,7 @@ func (a *Agent) EnsureEnrolled(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(a.credentialPath(), credBytes, 0o600); err != nil {
+	if err := a.writeOnce(credentialFileName, credBytes, 0o600); err != nil {
 		return "", fmt.Errorf("persist credential: %w", err)
 	}
 	return cred.PullToken, nil
@@ -270,8 +332,8 @@ func (a *Agent) RunOnce(ctx context.Context, pullToken string) (string, error) {
 			}
 			continue
 		}
-		pkgPath := filepath.Join(a.cfg.StoreDir, "run-"+run.RunID+".tar.zst.age")
-		if fileExists(pkgPath) {
+		// The signature is stored last, so its presence means the run is complete.
+		if fileExists(filepath.Join(a.cfg.StoreDir, "run-"+run.RunID+".manifest.json.minisig")) {
 			lastSynced = run.RunID
 			continue
 		}
@@ -335,66 +397,66 @@ func (a *Agent) pullRun(ctx context.Context, pullToken string, run runSummary) e
 		return fmt.Errorf("manifest run_id %q does not match advertised run %q", m.RunID, run.RunID)
 	}
 
-	pkgTmp, pkgSum, pkgSize, err := a.downloadToTemp(ctx, pullToken, run.PackageURL)
+	base := "run-" + run.RunID
+	// A previous cycle stored the package but stopped before its manifest.
+	if fileExists(filepath.Join(a.cfg.StoreDir, base+".tar.zst.age")) {
+		return a.storeManifest(base, manifestBytes, sigBytes)
+	}
+
+	pkgTmp, pkgSum, pkgSize, err := a.downloadPackage(ctx, pullToken, run, m.Package)
 	if err != nil {
 		return fmt.Errorf("fetch package: %w", err)
 	}
-	defer func() { _ = os.Remove(pkgTmp) }()
 
-	if pkgSum != m.Package.SHA256 {
-		return fmt.Errorf("package checksum mismatch for run %s: got %s want %s", run.RunID, pkgSum, m.Package.SHA256)
-	}
-	if m.Package.Bytes != 0 && pkgSize != m.Package.Bytes {
+	if pkgSum != m.Package.SHA256 || (m.Package.Bytes != 0 && pkgSize != m.Package.Bytes) {
+		_ = os.Remove(pkgTmp) // corrupt: don't resume from it
+		if pkgSum != m.Package.SHA256 {
+			return fmt.Errorf("package checksum mismatch for run %s: got %s want %s", run.RunID, pkgSum, m.Package.SHA256)
+		}
 		return fmt.Errorf("package size mismatch for run %s: got %d want %d", run.RunID, pkgSize, m.Package.Bytes)
 	}
 
-	base := "run-" + run.RunID
-	if err := a.commitFile(pkgTmp, base+".tar.zst.age"); err != nil {
+	if err := a.commitFile(pkgTmp, base+".tar.zst.age", 0o400); err != nil {
 		return err
 	}
-	if err := a.writeOnce(base+".manifest.json", manifestBytes); err != nil {
-		return err
-	}
-	if err := a.writeOnce(base+".manifest.json.minisig", sigBytes); err != nil {
-		return err
-	}
-	return nil
+	return a.storeManifest(base, manifestBytes, sigBytes)
 }
 
-// writeOnce creates path (relative to StoreDir) exclusively and makes it
-// read-only, refusing to touch an existing file.
-func (a *Agent) writeOnce(relName string, data []byte) error {
-	path := filepath.Join(a.cfg.StoreDir, relName)
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+func (a *Agent) storeManifest(base string, manifestBytes, sigBytes []byte) error {
+	if err := a.writeOnce(base+".manifest.json", manifestBytes, 0o400); err != nil {
+		return err
+	}
+	return a.writeOnce(base+".manifest.json.minisig", sigBytes, 0o400)
+}
+
+// writeOnce stores data as relName (relative to StoreDir) with the given mode
+// unless it already exists. It never overwrites or deletes a stored file.
+func (a *Agent) writeOnce(relName string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Join(a.cfg.StoreDir, incomingDirName), "write-*.tmp")
 	if err != nil {
-		if os.IsExist(err) {
-			return nil // already stored; never overwrite
-		}
 		return err
 	}
-	_, werr := f.Write(data)
-	cerr := f.Close()
-	if werr != nil {
-		_ = os.Remove(path)
-		return werr
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	_, werr := tmp.Write(data)
+	serr := tmp.Sync()
+	cerr := tmp.Close()
+	if err := errors.Join(werr, serr, cerr); err != nil {
+		return err
 	}
-	if cerr != nil {
-		return cerr
-	}
-	return os.Chmod(path, 0o400)
+	return a.commitFile(tmp.Name(), relName, mode)
 }
 
-// commitFile moves a verified temp file into the store exclusively and marks
-// it read-only.
-func (a *Agent) commitFile(tmpPath, relName string) error {
-	path := filepath.Join(a.cfg.StoreDir, relName)
-	if fileExists(path) {
-		return nil // already stored; never overwrite
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
+// commitFile publishes a finished file from the incoming dir as relName. A
+// hard link (unlike rename) never replaces an existing entry and only adds one,
+// so it also works when StoreDir is append-only.
+func (a *Agent) commitFile(tmpPath, relName string, mode os.FileMode) error {
+	if err := os.Chmod(tmpPath, mode); err != nil {
 		return err
 	}
-	return os.Chmod(path, 0o400)
+	if err := os.Link(tmpPath, filepath.Join(a.cfg.StoreDir, relName)); err != nil && !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	return os.Remove(tmpPath)
 }
 
 func (a *Agent) authGet(ctx context.Context, path, pullToken string) (*http.Response, error) {
@@ -425,34 +487,82 @@ func (a *Agent) fetchBytes(ctx context.Context, pullToken, path string) ([]byte,
 	return b, nil
 }
 
-// downloadToTemp streams path into a temp file under StoreDir, returning its
-// path, hex sha256, and byte count. The transfer is bounded only by an
-// idle/stall timeout (no whole-request deadline), so arbitrarily large
-// packages download successfully as long as bytes keep arriving.
-func (a *Agent) downloadToTemp(ctx context.Context, pullToken, path string) (string, string, int64, error) {
+// downloadPackage streams a run's package into a partial file in the incoming
+// dir and returns its path, hex sha256 and size. A partial file left by an
+// interrupted attempt is resumed with a Range request. It refuses to start
+// when the store can't hold the rest of the package. The transfer is bounded
+// only by an idle/stall timeout (no whole-request deadline).
+func (a *Agent) downloadPackage(ctx context.Context, pullToken string, run runSummary, want manifest.Package) (string, string, int64, error) {
+	partial := a.incomingPath("run-" + run.RunID + ".tar.zst.age.partial")
+	f, err := os.OpenFile(partial, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return "", "", 0, err
+	}
+	defer func() { _ = f.Close() }()
+
+	offset, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return "", "", 0, err
+	}
+	if want.Bytes > 0 && offset > want.Bytes {
+		if offset, err = restart(f); err != nil {
+			return "", "", 0, err
+		}
+	}
+
+	if want.Bytes > 0 {
+		free, _, err := diskUsage(a.cfg.StoreDir)
+		if err != nil {
+			return "", "", 0, fmt.Errorf("disk usage: %w", err)
+		}
+		if need := want.Bytes - offset + spaceReserve; free < need {
+			return "", "", 0, fmt.Errorf("not enough free space for run %s: need %d bytes, %d free", run.RunID, need, free)
+		}
+	}
+
+	h := sha256.New()
+	if offset > 0 {
+		if _, err := io.Copy(h, io.NewSectionReader(f, 0, offset)); err != nil {
+			return "", "", 0, err
+		}
+	}
+	if want.Bytes > 0 && offset == want.Bytes {
+		return partial, hex.EncodeToString(h.Sum(nil)), offset, nil
+	}
+
 	dlCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-
-	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, a.baseURL+path, nil)
+	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, a.baseURL+run.PackageURL, nil)
 	if err != nil {
 		return "", "", 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+pullToken)
-
+	if offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
 	resp, err := a.dlClient.Do(req)
 	if err != nil {
 		return "", "", 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return "", "", 0, fmt.Errorf("%s: %s: %s", path, resp.Status, errorBody(resp))
-	}
 
-	tmp, err := os.CreateTemp(a.cfg.StoreDir, ".download-*.tmp")
-	if err != nil {
-		return "", "", 0, err
+	switch {
+	case resp.StatusCode == http.StatusPartialContent && offset > 0 &&
+		strings.HasPrefix(resp.Header.Get("Content-Range"), fmt.Sprintf("bytes %d-", offset)):
+		a.cfg.Logger.Info("resuming package download", "run_id", run.RunID, "offset", offset)
+	case resp.StatusCode == http.StatusOK:
+		if offset > 0 { // the Primary ignored the range: start over
+			if offset, err = restart(f); err != nil {
+				return "", "", 0, err
+			}
+			h.Reset()
+		}
+	default:
+		if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+			_, _ = restart(f)
+		}
+		return "", "", 0, fmt.Errorf("%s: %s: %s", run.PackageURL, resp.Status, errorBody(resp))
 	}
-	defer func() { _ = tmp.Close() }()
 
 	// Cancel the request if the body stalls (no bytes) for dlIdle; each
 	// successful read resets the watchdog.
@@ -460,16 +570,25 @@ func (a *Agent) downloadToTemp(ctx context.Context, pullToken, path string) (str
 	defer idle.Stop()
 	body := &stallReader{r: resp.Body, reset: func() { idle.Reset(a.dlIdle) }}
 
-	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, h), body)
+	n, err := io.Copy(io.MultiWriter(f, h), body)
+	if serr := f.Sync(); err == nil {
+		err = serr
+	}
 	if err != nil {
-		_ = os.Remove(tmp.Name())
+		// The partial file is kept and resumed next cycle.
 		if ctx.Err() == nil && dlCtx.Err() != nil {
-			return "", "", 0, fmt.Errorf("download stalled (no data for %s): %w", a.dlIdle, err)
+			return "", "", 0, fmt.Errorf("download stalled (no data for %s) after %d bytes: %w", a.dlIdle, offset+n, err)
 		}
 		return "", "", 0, err
 	}
-	return tmp.Name(), hex.EncodeToString(h.Sum(nil)), n, nil
+	return partial, hex.EncodeToString(h.Sum(nil)), offset + n, nil
+}
+
+func restart(f *os.File) (int64, error) {
+	if err := f.Truncate(0); err != nil {
+		return 0, err
+	}
+	return f.Seek(0, io.SeekStart)
 }
 
 // stallReader wraps a response body and invokes reset after any read that
@@ -540,11 +659,26 @@ func diskUsage(dir string) (free, total int64, err error) {
 }
 
 // Loop runs the enroll-then-pull-and-heartbeat cycle until ctx is canceled.
+// Heartbeats also run on their own ticker, so a long download doesn't make
+// the node look dead to the Primary.
 func (a *Agent) Loop(ctx context.Context) error {
 	pullToken, err := a.EnsureEnrolled(ctx)
 	if err != nil {
 		return fmt.Errorf("enroll: %w", err)
 	}
+
+	go func() {
+		t := time.NewTicker(a.cfg.PullInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				a.heartbeat(ctx, pullToken)
+			}
+		}
+	}()
 
 	ticker := time.NewTicker(a.cfg.PullInterval)
 	defer ticker.Stop()
@@ -561,11 +695,16 @@ func (a *Agent) Loop(ctx context.Context) error {
 }
 
 func (a *Agent) cycle(ctx context.Context, pullToken string) {
-	lastRunID, err := a.RunOnce(ctx, pullToken)
-	if err != nil {
+	if _, err := a.RunOnce(ctx, pullToken); err != nil {
 		a.cfg.Logger.Error("pull cycle had errors", "error", err)
 	}
-	if err := a.Heartbeat(ctx, pullToken, lastRunID); err != nil {
+	a.lastRunID.Store(a.newestStoredRun())
+	a.heartbeat(ctx, pullToken)
+}
+
+func (a *Agent) heartbeat(ctx context.Context, pullToken string) {
+	last, _ := a.lastRunID.Load().(string)
+	if err := a.Heartbeat(ctx, pullToken, last); err != nil && ctx.Err() == nil {
 		a.cfg.Logger.Error("heartbeat failed", "error", err)
 	}
 }

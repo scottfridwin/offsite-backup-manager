@@ -50,30 +50,32 @@ jq -r '.package.sha256' run-<ts>.manifest.json
 The two values must match exactly. If they don't, the package is corrupt or
 tampered — do not proceed.
 
-## 3. Decrypt
+## 3. Decrypt, decompress and extract
+
+In one pipeline, so no decrypted copy of the package is written to disk:
 
 ```bash
-age -d -i age-identity.txt -o run-<ts>.tar.zst run-<ts>.tar.zst.age
+mkdir -p restored-<ts>
+age -d -i age-identity.txt run-<ts>.tar.zst.age | zstd -dc | tar -x -C restored-<ts>
 ```
 
 `age-identity.txt` is the private identity from the password manager. This step
 is the only place the private identity is ever used, and should only ever run on
 a trusted, offline-capable recovery host.
 
-## 4. Decompress and extract
+Run `tar` as root (add `--numeric-owner`) to restore each file's original
+UID/GID; as a normal user the files become yours, with their original modes and
+mtimes. `restored-<ts>/` now contains a full copy of the backup source tree
+(`BACKUP_SOURCE_DIR`) as it was captured for that run — every service's backup
+output, including full + incremental chains, since each run is a whole-tree
+snapshot (§3.1). Sockets, devices and pipes are not packaged (see the
+manifest's `contents.skipped`).
 
-```bash
-zstd -d run-<ts>.tar.zst -o run-<ts>.tar
-mkdir -p restored-<ts>
-tar -xf run-<ts>.tar -C restored-<ts>
-```
+`restored-<ts>/.offsite-backup-manifest.json` is the run's manifest as embedded
+in the package (without the package checksum). Delete it before copying the
+tree back into place.
 
-`restored-<ts>/` now contains a full copy of the backup source tree
-(`BACKUP_SOURCE_DIR`) exactly as it was captured for that run — every service's
-backup output, including full + incremental chains, since each run is a
-whole-tree snapshot (§3.1).
-
-## 5. Spot-check
+## 4. Spot-check
 
 - Confirm the top-level directory names under `restored-<ts>/` match what you
   expect from `BACKUP_SOURCE_DIR` (the manifest's `contents.top_level` lists
@@ -85,9 +87,8 @@ whole-tree snapshot (§3.1).
 - Record the drill (date, run ID, outcome) wherever you track this — there's no
   automated tracking in v1.
 
-## 6. Clean up
+## 5. Clean up
 
-Securely delete the decrypted/decompressed intermediates
-(`run-<ts>.tar.zst`, `run-<ts>.tar`, `restored-<ts>/`) and the identity file copy
-if it was staged on disk for this drill. Only the password manager (plus its
-offline backup copy) should retain the private identity long-term.
+Securely delete `restored-<ts>/` and the identity file copy if it was staged on
+disk for this drill. Only the password manager (plus its offline backup copy)
+should retain the private identity long-term.

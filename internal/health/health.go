@@ -31,6 +31,9 @@ type Config struct {
 	RunInterval      time.Duration
 	SyncGrace        time.Duration
 	SpaceCriticalPct float64
+	// NodeStale is how long an active node may go without a heartbeat before
+	// the Primary reports unhealthy; 0 disables the check.
+	NodeStale time.Duration
 	// Now returns the current time; overridable for tests. Defaults to time.Now.
 	Now func() time.Time
 }
@@ -63,21 +66,36 @@ func Evaluate(cfg Config) (Result, error) {
 		return Result{}, err
 	}
 
+	var reasons []string
+
+	// A failed run is reported until a later run succeeds, so a scheduled
+	// run that fails doesn't wait for the next one to be missed.
+	status, err := ReadRunStatus(cfg.OutputDir)
+	if err != nil {
+		return Result{}, err
+	}
+	if status != nil && status.Error != "" && (latest == nil || status.FinishedAt.After(createdAtOrZero(latest))) {
+		reasons = append(reasons, fmt.Sprintf("the last packaging run failed at %s: %s", status.FinishedAt.UTC().Format(time.RFC3339), status.Error))
+	}
+
+	active, err := cfg.Roster.ActiveNodes()
+	if err != nil {
+		return Result{}, fmt.Errorf("list active nodes: %w", err)
+	}
+	reasons = append(reasons, nodeReasons(cfg, active, now())...)
+
 	// A freshly deployed Primary has no runs yet. It is healthy until it misses
 	// an *expected* run (§9.2): with a schedule, that's the first scheduled
 	// occurrence after deploy, plus a grace window; without a schedule no
 	// cadence is known, so nothing can be "missed".
 	if latest == nil {
-		if sched == nil {
-			return Result{Healthy: true}, nil
+		if sched != nil {
+			firstDue := sched.Next(deployReference(cfg.OutputDir, now()))
+			if !now().Before(firstDue.Add(cfg.SyncGrace)) {
+				reasons = append(reasons, fmt.Sprintf("no run published yet; a run was expected by %s", firstDue.UTC().Format(time.RFC3339)))
+			}
 		}
-		firstDue := sched.Next(deployReference(cfg.OutputDir, now()))
-		if now().Before(firstDue.Add(cfg.SyncGrace)) {
-			return Result{Healthy: true}, nil
-		}
-		return Result{Healthy: false, Reasons: []string{
-			fmt.Sprintf("no run published yet; a run was expected by %s", firstDue.UTC().Format(time.RFC3339)),
-		}}, nil
+		return Result{Healthy: len(reasons) == 0, Reasons: reasons}, nil
 	}
 
 	createdAt, err := time.Parse(time.RFC3339, latest.CreatedAt)
@@ -85,8 +103,6 @@ func Evaluate(cfg Config) (Result, error) {
 		return Result{}, fmt.Errorf("parse run %s created_at: %w", latest.RunID, err)
 	}
 	age := now().Sub(createdAt)
-
-	var reasons []string
 
 	// Run freshness: with a schedule, a run is "missed" once the next scheduled
 	// occurrence after the latest run is past (plus grace); without a schedule,
@@ -100,15 +116,10 @@ func Evaluate(cfg Config) (Result, error) {
 		reasons = append(reasons, fmt.Sprintf("no run has succeeded within %s (last run %s was published %s ago)", cfg.RunInterval, latest.RunID, age.Round(time.Second)))
 	}
 
-	active, err := cfg.Roster.ActiveNodes()
-	if err != nil {
-		return Result{}, fmt.Errorf("list active nodes: %w", err)
-	}
-
 	// Required nodes only need to have confirmed once the grace window since
 	// the latest run has elapsed (eventual consistency, §9.1).
 	if age > cfg.SyncGrace {
-		for _, node := range requiredNodes(*latest, active) {
+		for _, node := range RequiredNodes(*latest, active) {
 			// A node that has never heartbeated isn't a participant yet (it may
 			// have enrolled but never confirmed), so it can't gate health.
 			if node.LastSeen.IsZero() {
@@ -120,7 +131,17 @@ func Evaluate(cfg Config) (Result, error) {
 		}
 	}
 
+	return Result{Healthy: len(reasons) == 0, Reasons: reasons}, nil
+}
+
+// nodeReasons reports active nodes that are critically low on space or have
+// stopped sending heartbeats. No nodes at all is not a problem.
+func nodeReasons(cfg Config, active []roster.Node, now time.Time) []string {
+	var reasons []string
 	for _, node := range active {
+		if cfg.NodeStale > 0 && !node.LastSeen.IsZero() && now.Sub(node.LastSeen) > cfg.NodeStale {
+			reasons = append(reasons, fmt.Sprintf("node %s (%s) has not sent a heartbeat since %s", node.Label, node.ID, node.LastSeen.UTC().Format(time.RFC3339)))
+		}
 		if node.TotalBytes <= 0 {
 			continue
 		}
@@ -129,8 +150,12 @@ func Evaluate(cfg Config) (Result, error) {
 			reasons = append(reasons, fmt.Sprintf("node %s (%s) is critically low on space (%.1f%% used)", node.Label, node.ID, usedPct))
 		}
 	}
+	return reasons
+}
 
-	return Result{Healthy: len(reasons) == 0, Reasons: reasons}, nil
+func createdAtOrZero(m *manifest.Manifest) time.Time {
+	t, _ := time.Parse(time.RFC3339, m.CreatedAt)
+	return t
 }
 
 // deployReference approximates when the Primary was first deployed, used to
@@ -144,11 +169,11 @@ func deployReference(outputDir string, fallback time.Time) time.Time {
 	return info.ModTime()
 }
 
-// requiredNodes returns the active nodes expected to have confirmed run m:
+// RequiredNodes returns the active nodes expected to have confirmed run m:
 // every active node for replicate-all (or a manifest with no recorded
 // scheme, for backward compatibility), or just the assigned node(s) for
 // round-robin.
-func requiredNodes(m manifest.Manifest, active []roster.Node) []roster.Node {
+func RequiredNodes(m manifest.Manifest, active []roster.Node) []roster.Node {
 	if m.Distribution.Scheme != manifest.SchemeRoundRobin {
 		return active
 	}

@@ -54,6 +54,8 @@ type Contents struct {
 	FileCount  int            `json:"file_count"`
 	TotalBytes int64          `json:"total_bytes"`
 	TopLevel   []EntrySummary `json:"top_level"`
+	// Skipped lists special files (sockets, devices, pipes) not packaged.
+	Skipped []string `json:"skipped,omitempty"`
 }
 
 // Distribution records which nodes this run was assigned to (§8). For

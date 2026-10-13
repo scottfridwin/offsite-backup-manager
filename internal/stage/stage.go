@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -32,38 +33,69 @@ type entry struct {
 
 type fileState map[string]entry
 
-// QuiesceAndStage waits for root to stop changing, then copies it to a fresh
-// staging directory under workDir and returns that path. The caller is
-// responsible for removing the staging directory when done.
-func QuiesceAndStage(root, workDir, id string, opt Options) (string, error) {
+// Meta is an entry's metadata as found in the source tree. The staged copy is
+// owned by the (unprivileged) packaging user, so the archive takes ownership,
+// mode and mtime from here instead.
+type Meta struct {
+	UID, GID int
+	Mode     fs.FileMode
+	ModTime  time.Time
+}
+
+// Result is a completed staging copy.
+type Result struct {
+	Dir  string
+	Meta map[string]Meta // keyed by slash-separated path relative to the root
+	// Skipped lists special files (sockets, devices, pipes) left out of the copy.
+	Skipped []string
+}
+
+// QuiesceAndStage waits for root to stop changing, copies it to a fresh
+// staging directory under workDir, then re-scans root: if anything changed
+// during the copy, the copy is discarded and the cycle repeats. The caller is
+// responsible for removing Result.Dir when done.
+func QuiesceAndStage(root, workDir, id string, opt Options) (Result, error) {
 	root = filepath.Clean(root)
+	dst := filepath.Join(workDir, "stage-"+id)
+	var skipped []string
 
 	prev, err := scan(root)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
-	stable := false
 	for i := 0; i < opt.MaxAttempts; i++ {
 		time.Sleep(opt.Settle)
 		cur, err := scan(root)
 		if err != nil {
-			return "", err
+			return Result{}, err
 		}
-		if statesEqual(prev, cur) {
-			stable = true
-			break
+		if !statesEqual(prev, cur) {
+			prev = cur
+			continue
 		}
-		prev = cur
-	}
-	if !stable {
-		return "", fmt.Errorf("source %q did not quiesce after %d attempts", root, opt.MaxAttempts)
-	}
 
-	dst := filepath.Join(workDir, "stage-"+id)
-	if err := copyTree(root, dst); err != nil {
-		return "", err
+		meta, err := copyTree(root, dst, &skipped)
+		if err != nil {
+			_ = os.RemoveAll(dst)
+			return Result{}, err
+		}
+		after, err := scan(root)
+		if err != nil {
+			_ = os.RemoveAll(dst)
+			return Result{}, err
+		}
+		if statesEqual(cur, after) {
+			return Result{Dir: dst, Meta: meta, Skipped: skipped}, nil
+		}
+		// A file changed while it was being copied; the copy may hold a
+		// half-written file.
+		if err := os.RemoveAll(dst); err != nil {
+			return Result{}, err
+		}
+		prev = after
+		skipped = nil
 	}
-	return dst, nil
+	return Result{}, fmt.Errorf("source %q did not quiesce after %d attempts", root, opt.MaxAttempts)
 }
 
 func scan(root string) (fileState, error) {
@@ -104,9 +136,10 @@ func statesEqual(a, b fileState) bool {
 	return true
 }
 
-func copyTree(src, dst string) error {
+func copyTree(src, dst string, skipped *[]string) (map[string]Meta, error) {
 	src = filepath.Clean(src)
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+	meta := map[string]Meta{}
+	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -119,6 +152,11 @@ func copyTree(src, dst string) error {
 		if err != nil {
 			return err
 		}
+		m := Meta{UID: -1, GID: -1, Mode: info.Mode(), ModTime: info.ModTime()}
+		if sys, ok := info.Sys().(*syscall.Stat_t); ok {
+			m.UID, m.GID = int(sys.Uid), int(sys.Gid)
+		}
+		meta[filepath.ToSlash(rel)] = m
 
 		switch {
 		case d.IsDir():
@@ -130,17 +168,19 @@ func copyTree(src, dst string) error {
 			}
 			return os.Symlink(link, target)
 		case info.Mode().IsRegular():
-			if err := copyFile(path, target, info); err != nil {
+			if err := copyFile(path, target); err != nil {
 				return err
 			}
 			return os.Chtimes(target, info.ModTime(), info.ModTime())
 		default:
-			return nil // skip special files
+			*skipped = append(*skipped, filepath.ToSlash(rel))
+			return nil // sockets, devices, pipes: nothing to back up
 		}
 	})
+	return meta, err
 }
 
-func copyFile(src, dst string, info fs.FileInfo) error {
+func copyFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
 		return err
 	}
@@ -150,7 +190,9 @@ func copyFile(src, dst string, info fs.FileInfo) error {
 	}
 	defer func() { _ = in.Close() }()
 
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+	// 0600, not the source mode: a source file without owner-read must still be
+	// readable when archived; its real mode is in Meta.
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}

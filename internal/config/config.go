@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/scottfridwin/offsite-backup-manager/internal/manifest"
@@ -31,6 +32,9 @@ type Config struct {
 	// NodeRosterFile is required when DistributionScheme is "round-robin", to
 	// assign the run to the next node in rotation (NODE_ROSTER_FILE).
 	NodeRosterFile string
+	// KeepRuns is how many published runs to keep in OutputDir; older runs are
+	// deleted once every node has confirmed them. 0 keeps all (PACKAGE_KEEP_RUNS).
+	KeepRuns int
 }
 
 var recipientSep = regexp.MustCompile(`[\s,]+`)
@@ -41,6 +45,12 @@ func FromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	keepRuns := 0
+	if v := os.Getenv("PACKAGE_KEEP_RUNS"); v != "" {
+		if keepRuns, err = strconv.Atoi(v); err != nil {
+			return Config{}, fmt.Errorf("invalid PACKAGE_KEEP_RUNS %q: %w", v, err)
+		}
+	}
 	return Config{
 		SourceDir:          os.Getenv("BACKUP_SOURCE_DIR"),
 		WorkDir:            envOr("PACKAGE_WORK_DIR", os.TempDir()),
@@ -50,6 +60,7 @@ func FromEnv() (Config, error) {
 		MinisignPassword:   minisignPassword,
 		DistributionScheme: envOr("DISTRIBUTION_SCHEME", manifest.SchemeReplicateAll),
 		NodeRosterFile:     os.Getenv("NODE_ROSTER_FILE"),
+		KeepRuns:           keepRuns,
 	}, nil
 }
 
@@ -61,6 +72,7 @@ func (c *Config) BindFlags(fs *flag.FlagSet) {
 	fs.StringVar(&c.MinisignKeyFile, "minisign-key", c.MinisignKeyFile, "minisign secret key file (MINISIGN_SECKEY)")
 	fs.StringVar(&c.DistributionScheme, "distribution-scheme", c.DistributionScheme, "replicate-all or round-robin (DISTRIBUTION_SCHEME)")
 	fs.StringVar(&c.NodeRosterFile, "roster", c.NodeRosterFile, "node roster file; required for round-robin (NODE_ROSTER_FILE)")
+	fs.IntVar(&c.KeepRuns, "keep-runs", c.KeepRuns, "published runs to keep; older runs are deleted once every node has confirmed them; 0 keeps all (PACKAGE_KEEP_RUNS)")
 	fs.Func("recipient", "age recipient to encrypt to; repeatable (AGE_RECIPIENT)", func(v string) error {
 		c.AgeRecipients = append(c.AgeRecipients, splitRecipients(v)...)
 		return nil
@@ -80,6 +92,9 @@ func (c Config) Validate() error {
 	}
 	if c.MinisignKeyFile == "" {
 		return fmt.Errorf("a minisign signing key is required (set MINISIGN_SECKEY or -minisign-key)")
+	}
+	if c.KeepRuns < 0 {
+		return fmt.Errorf("PACKAGE_KEEP_RUNS must be 0 (keep all) or more, got %d", c.KeepRuns)
 	}
 	switch c.DistributionScheme {
 	case "", manifest.SchemeReplicateAll:
