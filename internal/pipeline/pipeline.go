@@ -137,6 +137,7 @@ func run(cfg config.Config, version string) (Result, error) {
 	m := manifest.New(runID)
 	m.SourceDir = cfg.SourceDir
 	m.Tool = manifest.Tool{Name: "offsite-backup-manager", Version: version}
+	m.Package = manifest.Package{Name: pkgName, Compression: "zstd", Encryption: "age"}
 	m.Distribution, err = buildDistribution(cfg)
 	if err != nil {
 		return Result{}, fmt.Errorf("distribution assignment: %w", err)
@@ -156,13 +157,8 @@ func run(cfg config.Config, version string) (Result, error) {
 		return Result{}, fmt.Errorf("package: %w", err)
 	}
 
-	m.Package = manifest.Package{
-		Name:        pkgName,
-		Bytes:       size,
-		SHA256:      sum,
-		Compression: "zstd",
-		Encryption:  "age",
-	}
+	m.Package.Bytes = size
+	m.Package.SHA256 = sum
 	m.Contents = buildContents(stats, staged.Skipped)
 
 	mb, err := m.Marshal()

@@ -128,7 +128,7 @@ func TestRunEndToEnd(t *testing.T) {
 	if err := json.Unmarshal([]byte(embedded), &em); err != nil {
 		t.Fatalf("parse embedded manifest: %v", err)
 	}
-	if em.RunID != res.RunID || em.Contents.FileCount != 2 || em.Package.SHA256 != "" {
+	if em.RunID != res.RunID || em.Contents.FileCount != 2 || em.Package.SHA256 != "" || em.Package.Name != filepath.Base(res.PackagePath) {
 		t.Errorf("embedded manifest = %+v", em)
 	}
 
