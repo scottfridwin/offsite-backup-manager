@@ -25,6 +25,9 @@ type HealthConfig struct {
 	// Schedule is the cron expression the primary self-schedules on (SCHEDULE);
 	// when set, run freshness is judged against expected scheduled occurrences.
 	Schedule string
+	// NodeStale is how long an active node may go without a heartbeat before
+	// unhealthy; 0 disables (HEALTH_NODE_STALE).
+	NodeStale time.Duration
 }
 
 // HealthConfigFromEnv builds a HealthConfig from environment variables.
@@ -36,6 +39,7 @@ func HealthConfigFromEnv() HealthConfig {
 		SyncGrace:        envDurationOr("HEALTH_SYNC_GRACE", 6*time.Hour),
 		SpaceCriticalPct: envFloatOr("NODE_SPACE_CRITICAL_PCT", 90),
 		Schedule:         envOr("SCHEDULE", ""),
+		NodeStale:        envDurationOr("HEALTH_NODE_STALE", 48*time.Hour),
 	}
 }
 
@@ -47,6 +51,7 @@ func (c *HealthConfig) BindFlags(fs *flag.FlagSet) {
 	fs.DurationVar(&c.SyncGrace, "health-sync-grace", c.SyncGrace, "grace window for nodes to confirm the latest run (HEALTH_SYNC_GRACE)")
 	fs.Float64Var(&c.SpaceCriticalPct, "node-space-critical-pct", c.SpaceCriticalPct, "node free-space critical threshold (NODE_SPACE_CRITICAL_PCT)")
 	fs.StringVar(&c.Schedule, "schedule", c.Schedule, "cron expression the primary self-schedules on (SCHEDULE)")
+	fs.DurationVar(&c.NodeStale, "health-node-stale", c.NodeStale, "unhealthy when an active node sends no heartbeat for this long; 0 disables (HEALTH_NODE_STALE)")
 }
 
 // Validate checks that the required fields are present.

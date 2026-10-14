@@ -46,6 +46,21 @@ SD card or an attached disk) — this is where every verified run accumulates
 forever (§7.2, never pruned). Size it for your intended retention per the
 capacity guidance below.
 
+Make the store write-once at the OS level (the Raspberry Pi bundle from
+`provision-node` does all of this). As root, on an ext4/XFS/Btrfs filesystem:
+
+```bash
+install -d -o 65532 -g 65532 -m 0700 /srv/backup-node/store/.incoming  # chown through the user namespace on rootless podman
+chattr +a /srv/backup-node/store    # entries can be added, never removed or renamed
+```
+
+Then make stored files immutable as they arrive, e.g. a root timer or `.path`
+unit running
+`find /srv/backup-node/store -maxdepth 1 -type f -links 1 -exec chattr +i {} +`.
+The agent stages files in `.incoming` (which must not be append-only) and
+hard-links them into the store, so it works unchanged on such a store. Only
+root can clear these attributes; a compromised node agent or Primary cannot.
+
 ## 4. First boot: environment + auto-start unit
 
 Example `docker-compose.yml` (adjust paths/image/version for your setup):

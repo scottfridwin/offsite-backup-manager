@@ -18,7 +18,7 @@ func TestWriteTarZst(t *testing.T) {
 	mustWrite(t, filepath.Join(root, "svcB", "c.bin"), "xyz")
 
 	var buf bytes.Buffer
-	stats, err := WriteTarZst(&buf, root)
+	stats, err := WriteTarZst(&buf, root, Options{})
 	if err != nil {
 		t.Fatalf("WriteTarZst: %v", err)
 	}

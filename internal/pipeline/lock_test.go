@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"filippo.io/age"
+
+	"github.com/scottfridwin/offsite-backup-manager/internal/archive"
 )
 
 func TestLockOutputDirIsExclusive(t *testing.T) {
@@ -38,12 +40,15 @@ func TestWritePackageNeverOverwrites(t *testing.T) {
 	pkgPath := filepath.Join(t.TempDir(), "run-20260101T000000Z.tar.zst.age")
 	writeFile(t, pkgPath, "published")
 
-	_, _, _, err = writePackage(pkgPath, staged, []age.Recipient{id.Recipient()})
+	_, _, _, err = writePackage(pkgPath, staged, []age.Recipient{id.Recipient()}, archive.Options{})
 	if !errors.Is(err, fs.ErrExist) {
 		t.Fatalf("expected fs.ErrExist, got %v", err)
 	}
 	b, err := os.ReadFile(pkgPath)
 	if err != nil || string(b) != "published" {
 		t.Fatalf("existing package modified: %q, %v", b, err)
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(pkgPath), ".*.partial")); len(leftovers) != 0 {
+		t.Fatalf("temporary package left behind: %v", leftovers)
 	}
 }

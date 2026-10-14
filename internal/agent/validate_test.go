@@ -95,8 +95,11 @@ func TestAgentRejectsMaliciousRunListing(t *testing.T) {
 	if n := otherRequests.Load(); n != 0 {
 		t.Fatalf("agent made %d requests for rejected runs", n)
 	}
-	if entries, _ := os.ReadDir(store); len(entries) != 0 {
-		t.Fatalf("store should be empty, has %v", entries)
+	if entries, _ := os.ReadDir(store); len(entries) != 1 || entries[0].Name() != incomingDirName {
+		t.Fatalf("store should hold only the empty incoming dir, has %v", entries)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(store, incomingDirName)); len(entries) != 0 {
+		t.Fatalf("incoming dir should be empty, has %v", entries)
 	}
 	if entries, _ := os.ReadDir(parent); len(entries) != 1 {
 		t.Fatalf("nothing may be written next to the store, found %v", entries)

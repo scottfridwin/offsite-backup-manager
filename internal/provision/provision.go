@@ -250,6 +250,56 @@ install -d -o "$NODE_USER" -g "$NODE_USER" "$STORE_PARENT" "$STORE_DIR"
 install -o "$NODE_USER" -g "$NODE_USER" -m 0644 "$DEST/minisign.pub" "$STORE_PARENT/minisign.pub"
 run_as_user podman unshare chown -R 65532:65532 "$STORE_DIR"
 
+# 4b. Write-once store, enforced by the kernel (the node user can't undo it;
+#     changing these attributes needs root). The store is append-only: entries
+#     can be added, never removed or renamed. The agent stages files in
+#     .incoming (created first, so it is NOT append-only) and hard-links them
+#     in. Each stored file is then made immutable by a root unit: on every
+#     store change and every 15 minutes, as a fallback.
+run_as_user podman unshare install -d -o 65532 -g 65532 -m 0700 "$STORE_DIR/.incoming"
+chattr +a "$STORE_DIR"
+lsattr -d "$STORE_DIR" | grep -q '^[^ ]*a' || { log "error: could not make $STORE_DIR append-only"; exit 1; }
+cat > /usr/local/sbin/backup-node-seal.sh <<SEAL
+#!/bin/sh
+# Make stored backup files immutable. -links 1 skips a file the agent is still
+# publishing (its staging link in .incoming is removed right after).
+exec find "$STORE_DIR" -maxdepth 1 -type f -links 1 -exec chattr +i {} +
+SEAL
+chmod 0755 /usr/local/sbin/backup-node-seal.sh
+cat > /etc/systemd/system/backup-node-seal.service <<UNIT
+[Unit]
+Description=Make stored backup files immutable (WORM)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/backup-node-seal.sh
+UNIT
+cat > /etc/systemd/system/backup-node-seal.path <<UNIT
+[Unit]
+Description=Seal new backup files as soon as they are stored
+
+[Path]
+PathChanged=$STORE_DIR
+Unit=backup-node-seal.service
+
+[Install]
+WantedBy=paths.target
+UNIT
+cat > /etc/systemd/system/backup-node-seal.timer <<UNIT
+[Unit]
+Description=Seal stored backup files periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Unit=backup-node-seal.service
+
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now backup-node-seal.path backup-node-seal.timer
+
 # 5. One-time enrollment token -> rootless podman secret. The token file is
 #    root-owned (0600), so feed it via stdin; the rootless user cannot read it.
 cat "$DEST/enrollment_token" | run_as_user podman secret create enrollment_token -

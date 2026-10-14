@@ -245,10 +245,29 @@ func (s *server) handlePackage(w http.ResponseWriter, r *http.Request, _ roster.
 		return
 	}
 
+	// Resume support for interrupted multi-GB downloads: a single open-ended
+	// range ("bytes=N-") is all the node agent sends; other forms get the whole file.
+	size := fi.Size()
+	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
 	w.Header().Set("Last-Modified", fi.ModTime().UTC().Format(http.TimeFormat))
-	w.WriteHeader(http.StatusOK)
+	status := http.StatusOK
+	if start, ok := openEndedRange(r.Header.Get("Range")); ok {
+		if start >= size {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+			writeError(w, http.StatusRequestedRangeNotSatisfiable, "range not satisfiable")
+			return
+		}
+		if _, err := f.Seek(start, io.SeekStart); err != nil {
+			writeError(w, http.StatusInternalServerError, "seek failed")
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, size-1, size))
+		size -= start
+		status = http.StatusPartialContent
+	}
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.WriteHeader(status)
 
 	rc := http.NewResponseController(w)
 	buf := make([]byte, packageStreamChunkBytes)
@@ -274,6 +293,23 @@ func (s *server) handlePackage(w http.ResponseWriter, r *http.Request, _ roster.
 			return
 		}
 	}
+}
+
+// openEndedRange parses a "bytes=N-" Range header.
+func openEndedRange(h string) (int64, bool) {
+	spec, ok := strings.CutPrefix(h, "bytes=")
+	if !ok {
+		return 0, false
+	}
+	startStr, ok := strings.CutSuffix(spec, "-")
+	if !ok || startStr == "" {
+		return 0, false
+	}
+	start, err := strconv.ParseInt(startStr, 10, 64)
+	if err != nil || start < 0 {
+		return 0, false
+	}
+	return start, true
 }
 
 type heartbeatRequest struct {

@@ -18,10 +18,10 @@ func TestQuiesceAndStageCopiesTree(t *testing.T) {
 		t.Fatalf("QuiesceAndStage: %v", err)
 	}
 
-	if got := readFile(t, filepath.Join(staged, "svc", "data.txt")); got != "payload" {
+	if got := readFile(t, filepath.Join(staged.Dir, "svc", "data.txt")); got != "payload" {
 		t.Errorf("staged content mismatch: %q", got)
 	}
-	if got := readFile(t, filepath.Join(staged, "top.txt")); got != "hi" {
+	if got := readFile(t, filepath.Join(staged.Dir, "top.txt")); got != "hi" {
 		t.Errorf("staged content mismatch: %q", got)
 	}
 }

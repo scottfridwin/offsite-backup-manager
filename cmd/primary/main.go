@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -88,6 +89,17 @@ func runPackage(args []string) {
 	fmt.Printf("  package   %s (%d bytes, sha256 %s)\n", res.PackagePath, res.Manifest.Package.Bytes, res.Manifest.Package.SHA256)
 	fmt.Printf("  manifest  %s\n", res.ManifestPath)
 	fmt.Printf("  signature %s\n", res.SignaturePath)
+	reportRun(res)
+}
+
+// reportRun prints what a run left out and what it pruned.
+func reportRun(res pipeline.Result) {
+	for _, p := range res.Manifest.Contents.Skipped {
+		fmt.Fprintf(os.Stderr, "warning: run %s skipped special file %s\n", res.RunID, p)
+	}
+	if len(res.Pruned) > 0 {
+		fmt.Printf("  pruned    %s\n", strings.Join(res.Pruned, ", "))
+	}
 }
 
 func usage() {
@@ -114,6 +126,9 @@ package flags:
   -minisign-key         minisign secret key file (env MINISIGN_SECKEY)
   -distribution-scheme  replicate-all or round-robin (env DISTRIBUTION_SCHEME)
   -roster               node roster file; required for round-robin (env NODE_ROSTER_FILE)
+  -keep-runs            published runs to keep in the output directory; older
+                        runs are deleted once every node has confirmed them;
+                        0 keeps all (env PACKAGE_KEEP_RUNS)
 
 serve flags:
   -listen           listen address (env BACKUP_LISTEN_ADDR, default :8080)
@@ -148,6 +163,8 @@ healthcheck flags:
   -health-run-interval      max age of the last run before unhealthy when no schedule is set (env HEALTH_RUN_INTERVAL)
   -health-sync-grace        grace window for nodes to confirm the latest run (env HEALTH_SYNC_GRACE)
   -node-space-critical-pct  node free-space critical threshold (env NODE_SPACE_CRITICAL_PCT)
+  -health-node-stale        unhealthy when an active node sends no heartbeat for this
+                            long; 0 disables (env HEALTH_NODE_STALE, default 48h)
 
 nodes flags:
   -roster  node roster file (env NODE_ROSTER_FILE)
@@ -254,6 +271,7 @@ func startScheduler(cfg config.ServerConfig) *cron.Cron {
 			return
 		}
 		fmt.Printf("scheduled run %s published\n", res.RunID)
+		reportRun(res)
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: invalid SCHEDULE cron expression:", err)
@@ -415,6 +433,7 @@ func runHealthcheck(args []string) {
 		RunInterval:      cfg.RunInterval,
 		SyncGrace:        cfg.SyncGrace,
 		SpaceCriticalPct: cfg.SpaceCriticalPct,
+		NodeStale:        cfg.NodeStale,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

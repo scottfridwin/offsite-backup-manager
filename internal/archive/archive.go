@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -37,10 +38,23 @@ func (s Stats) SortedEntries() []Entry {
 	return out
 }
 
+// HeaderHook may adjust each entry's tar header before it is written; rel is
+// the slash-separated path relative to the archived root.
+type HeaderHook func(rel string, hdr *tar.Header)
+
+// Options customizes WriteTarZst. The zero value archives the tree as-is.
+type Options struct {
+	Hook HeaderHook
+	// Trailer, if set, returns a file appended as the archive's last entry,
+	// computed from the stats of everything before it.
+	Trailer func(Stats) (name string, data []byte, err error)
+}
+
 // WriteTarZst walks root and writes it as a zstd-compressed tar into dst. Only
 // directories, regular files, and symlinks are archived; other special files
-// are skipped. Sizes reported in Stats are the uncompressed file sizes.
-func WriteTarZst(dst io.Writer, root string) (Stats, error) {
+// are skipped. Sizes reported in Stats are the uncompressed file sizes and
+// exclude the trailer.
+func WriteTarZst(dst io.Writer, root string, opts Options) (Stats, error) {
 	st := Stats{topLevel: map[string]*Entry{}}
 
 	zw, err := zstd.NewWriter(dst)
@@ -87,6 +101,9 @@ func WriteTarZst(dst io.Writer, root string) (Stats, error) {
 		if d.IsDir() {
 			hdr.Name += "/"
 		}
+		if opts.Hook != nil {
+			opts.Hook(filepath.ToSlash(rel), hdr)
+		}
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
 		}
@@ -117,6 +134,9 @@ func WriteTarZst(dst io.Writer, root string) (Stats, error) {
 		}
 		return nil
 	})
+	if walkErr == nil && opts.Trailer != nil {
+		walkErr = writeTrailer(tw, opts.Trailer, st)
+	}
 	if walkErr != nil {
 		_ = tw.Close()
 		_ = zw.Close()
@@ -130,6 +150,25 @@ func WriteTarZst(dst io.Writer, root string) (Stats, error) {
 		return st, err
 	}
 	return st, nil
+}
+
+func writeTrailer(tw *tar.Writer, trailer func(Stats) (string, []byte, error), st Stats) error {
+	name, data, err := trailer(st)
+	if err != nil {
+		return err
+	}
+	hdr := &tar.Header{
+		Typeflag: tar.TypeReg,
+		Name:     name,
+		Mode:     0o644,
+		Size:     int64(len(data)),
+		ModTime:  time.Now(),
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		return err
+	}
+	_, err = tw.Write(data)
+	return err
 }
 
 func topLevel(rel string) string {
