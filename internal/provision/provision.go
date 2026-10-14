@@ -167,6 +167,11 @@ func renderUserData(b Bundle, script string) (string, error) {
 // the provisioning script to disk, then runs the script once after boot.
 const userDataTmpl = `#cloud-config
 hostname: {{.Label}}
+# No login user is defined, so Raspberry Pi OS would start its "new username"
+# console wizard, which blocks boot (and runcmd) forever. Mask it, as Pi OS's
+# cloud-init does itself when user-data defines a user.
+bootcmd:
+  - [ sh, -c, "systemctl mask --now userconfig.service || true" ]
 write_files:
   - path: /var/lib/backup-node-provision/minisign.pub
     permissions: '0644'
@@ -344,7 +349,8 @@ Steps (no SSH; works from Windows, macOS, or Linux):
      files from this bundle onto it, replacing any existing copies:
         user-data
         meta-data
-  3. Eject the card and boot the Pi (wired Ethernet, DHCP).
+  3. Eject the card and boot the Pi (wired Ethernet, DHCP). No login prompt or
+     setup wizard appears on a connected screen; that is expected.
   4. Watch it enroll on the Primary:
         primary nodes -roster <ROSTER>
      It appears 'pending', then 'active' after its first heartbeat. If something
