@@ -44,6 +44,7 @@ func TestRenderProducesCloudInitFiles(t *testing.T) {
 		`NODE_USER="backupnode"`, // non-reserved user (fixes the 'backup' collision)
 		"65532:65532",
 		"podman secret create enrollment_token -", // token via stdin
+		"systemctl mask --now userconfig.service", // first-boot wizard would block runcmd
 	} {
 		if !strings.Contains(ud, marker) {
 			t.Fatalf("user-data embedded script missing %q", marker)
