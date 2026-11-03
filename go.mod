@@ -7,7 +7,7 @@ require (
 	filippo.io/age v1.3.2
 	github.com/klauspost/compress v1.18.7
 	github.com/robfig/cron/v3 v3.0.1
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.49.0
 )
 
 require (
