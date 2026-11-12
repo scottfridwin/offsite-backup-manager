@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	aead.dev/minisign v0.3.0
 	filippo.io/age v1.3.2
-	github.com/klauspost/compress v1.20.3
+	github.com/klauspost/compress v1.20.4
 	github.com/robfig/cron/v3 v3.0.1
 	golang.org/x/sys v0.50.0
 )
