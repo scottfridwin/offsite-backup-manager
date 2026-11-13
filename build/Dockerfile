@@ -1,7 +1,7 @@
 # Multi-stage build for either binary. Select with --build-arg TARGET=primary|node.
 # The build stage runs on the build host and cross-compiles for the target
 # platform, so arm/v7 and arm64 images build without QEMU emulation.
-FROM --platform=$BUILDPLATFORM golang:1.27-bookworm@sha256:dc0963f32053e4bc451d24d87e3892d42d01021b61f093e98eb95c0352bb84b0 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS build
 ARG TARGET=primary
 # The primary uses its version as the default node image tag for provisioning,
 # so release builds must pass the exact image version (e.g. 1.2.3).
